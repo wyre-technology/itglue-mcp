@@ -1,0 +1,52 @@
+{
+  "name": "@wyre-technology/itglue-mcp",
+  "version": "0.0.0-semantically-released",
+  "description": "IT Glue MCP server for Claude",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wyre-technology/itglue-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "claude",
+    "itglue",
+    "it-glue",
+    "msp",
+    "documentation"
+  ],
+  "author": "Wyre Technology",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/wyre-technology/itglue-mcp/issues"
+  },
+  "homepage": "https://github.com/wyre-technology/itglue-mcp#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "eslint": "^8.56.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
