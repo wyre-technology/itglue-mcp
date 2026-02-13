@@ -1,0 +1,31 @@
+{
+  "manifest_version": "0.3",
+  "name": "itglue-mcp",
+  "version": "0.0.1",
+  "display_name": "IT Glue MCP Server",
+  "description": "IT Glue MCP server for Claude",
+  "author": { "name": "Aaron Sachs", "url": "https://github.com/asachs01" },
+  "repository": { "type": "git", "url": "https://github.com/wyre-technology/itglue-mcp" },
+  "homepage": "https://github.com/wyre-technology/itglue-mcp",
+  "license": "MIT",
+  "keywords": ["itglue", "documentation", "msp", "it-management"],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "ITGLUE_API_KEY": "${user_config.itglue_api_key}",
+        "ITGLUE_REGION": "${user_config.itglue_region}",
+        "MCP_TRANSPORT": "stdio"
+      }
+    }
+  },
+  "tools_generated": true,
+  "user_config": {
+    "itglue_api_key": { "type": "string", "title": "IT Glue API Key", "description": "Your IT Glue API key", "required": true, "sensitive": true },
+    "itglue_region": { "type": "string", "title": "IT Glue Region", "description": "IT Glue region (leave empty for default)", "required": false }
+  },
+  "compatibility": { "platforms": ["darwin", "win32", "linux"], "runtimes": { "node": ">=18.0.0" }, "claude_desktop": ">=0.10.0" }
+}
