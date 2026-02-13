@@ -2,6 +2,12 @@
 
 A Model Context Protocol (MCP) server that provides Claude with access to IT Glue documentation and asset management.
 
+## One-Click Deployment
+
+[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/wyre-technology/itglue-mcp/tree/main)
+
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/wyre-technology/itglue-mcp)
+
 ## Installation
 
 ```bash

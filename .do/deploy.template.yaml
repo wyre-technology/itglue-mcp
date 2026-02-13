@@ -1,0 +1,26 @@
+spec:
+  name: itglue-mcp
+  services:
+  - name: itglue-mcp
+    github:
+      repo: wyre-technology/itglue-mcp
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    dockerfile_path: Dockerfile
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    envs:
+    - key: MCP_TRANSPORT
+      value: "http"
+      scope: RUN_TIME
+    - key: NODE_ENV
+      value: "production"
+      scope: RUN_TIME
+    - key: ITGLUE_API_KEY
+      type: SECRET
+      scope: RUN_AND_BUILD_TIME
+    - key: ITGLUE_REGION
+      type: SECRET
+      scope: RUN_AND_BUILD_TIME
