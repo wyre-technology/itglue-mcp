@@ -6,8 +6,12 @@
  * It accepts credentials via HTTP headers from the MCP Gateway.
  */
 
+import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -104,9 +108,9 @@ class ITGlueClient {
   private readonly apiKey: string;
   private readonly baseUrl: string;
 
-  constructor(config: { apiKey: string; region?: ITGlueRegion }) {
+  constructor(config: { apiKey: string; region?: ITGlueRegion; baseUrl?: string }) {
     this.apiKey = config.apiKey;
-    this.baseUrl = REGION_URLS[config.region || "us"];
+    this.baseUrl = config.baseUrl || REGION_URLS[config.region || "us"];
   }
 
   private buildQueryString(params: Record<string, unknown>): string {
@@ -197,12 +201,14 @@ const server = new Server(
 interface GatewayCredentials {
   apiKey?: string;
   region?: ITGlueRegion;
+  baseUrl?: string;
 }
 
 function getCredentialsFromEnv(): GatewayCredentials {
   return {
     apiKey: process.env.ITGLUE_API_KEY || process.env.X_API_KEY,
     region: (process.env.ITGLUE_REGION || "us") as ITGlueRegion,
+    baseUrl: process.env.ITGLUE_BASE_URL,
   };
 }
 
@@ -213,6 +219,7 @@ function createClient(credentials: GatewayCredentials): ITGlueClient {
   return new ITGlueClient({
     apiKey: credentials.apiKey,
     region: credentials.region || "us",
+    baseUrl: credentials.baseUrl,
   });
 }
 
@@ -755,11 +762,127 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Start the server
-async function main() {
+/**
+ * Start with stdio transport (default for local/CLI usage)
+ */
+async function startStdioTransport(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("IT Glue MCP server running on stdio");
+}
+
+/**
+ * Start with HTTP Streamable transport (for Docker/cloud deployment)
+ * Supports both env-based and gateway (header-based) credential modes
+ */
+async function startHttpTransport(): Promise<void> {
+  const port = parseInt(process.env.MCP_HTTP_PORT || "8080", 10);
+  const host = process.env.MCP_HTTP_HOST || "0.0.0.0";
+  const isGatewayMode = process.env.AUTH_MODE === "gateway";
+
+  const httpTransport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+    enableJsonResponse: true,
+  });
+
+  const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+
+    // Health endpoint - no auth required
+    if (url.pathname === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          status: "ok",
+          transport: "http",
+          authMode: isGatewayMode ? "gateway" : "env",
+          timestamp: new Date().toISOString(),
+        })
+      );
+      return;
+    }
+
+    // MCP endpoint
+    if (url.pathname === "/mcp") {
+      // In gateway mode, extract credentials from headers
+      if (isGatewayMode) {
+        const headers = req.headers as Record<string, string | string[] | undefined>;
+        const apiKey =
+          (headers["x-itglue-api-key"] as string) ||
+          (headers["x-api-key"] as string);
+
+        if (!apiKey) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: "Missing credentials",
+              message:
+                "Gateway mode requires X-ITGlue-API-Key header",
+              required: ["X-ITGlue-API-Key"],
+            })
+          );
+          return;
+        }
+
+        // Set environment variables for this request so getCredentialsFromEnv() picks them up
+        process.env.ITGLUE_API_KEY = apiKey;
+
+        const baseUrl = headers["x-itglue-base-url"] as string | undefined;
+        if (baseUrl) {
+          process.env.ITGLUE_BASE_URL = baseUrl;
+        }
+
+        const region = headers["x-itglue-region"] as string | undefined;
+        if (region) {
+          process.env.ITGLUE_REGION = region;
+        }
+      }
+
+      httpTransport.handleRequest(req, res);
+      return;
+    }
+
+    // 404 for everything else
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Not found", endpoints: ["/mcp", "/health"] }));
+  });
+
+  await server.connect(httpTransport as unknown as Transport);
+
+  await new Promise<void>((resolve) => {
+    httpServer.listen(port, host, () => {
+      console.error(`IT Glue MCP server listening on http://${host}:${port}/mcp`);
+      console.error(`Health check available at http://${host}:${port}/health`);
+      console.error(
+        `Authentication mode: ${isGatewayMode ? "gateway (header-based)" : "env (environment variables)"}`
+      );
+      resolve();
+    });
+  });
+
+  // Graceful shutdown
+  const shutdown = async () => {
+    console.error("Shutting down IT Glue MCP server...");
+    await new Promise<void>((resolve, reject) => {
+      httpServer.close((err) => (err ? reject(err) : resolve()));
+    });
+    await server.close();
+    process.exit(0);
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+
+// Start the server
+async function main() {
+  const transportType = process.env.MCP_TRANSPORT || "stdio";
+
+  if (transportType === "http") {
+    await startHttpTransport();
+  } else {
+    await startStdioTransport();
+  }
 }
 
 main().catch(console.error);

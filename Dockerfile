@@ -5,7 +5,7 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies (including GitHub package)
+# Install dependencies
 RUN npm ci
 
 # Copy source and build
@@ -29,11 +29,18 @@ COPY --from=builder /app/package.json ./
 
 USER mcp
 
-# MCP servers communicate via stdio, but we expose a port for health checks
-EXPOSE 3000
+# Expose port for HTTP transport
+EXPOSE 8080
 
-# Health check endpoint
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD node -e "console.log('healthy')" || exit 1
+# Health check against the actual HTTP endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+
+# Set environment variables for HTTP transport
+ENV MCP_TRANSPORT=http
+ENV MCP_HTTP_PORT=8080
+ENV MCP_HTTP_HOST=0.0.0.0
+# Default to env mode; set to 'gateway' for hosted deployment
+ENV AUTH_MODE=env
 
 CMD ["node", "dist/index.js"]
