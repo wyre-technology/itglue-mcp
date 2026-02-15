@@ -7,7 +7,6 @@
  */
 
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -185,18 +184,6 @@ class ITGlueClient {
   }
 }
 
-const server = new Server(
-  {
-    name: "itglue-mcp",
-    version: "1.0.0",
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
-);
-
 // Credential extraction from gateway headers
 interface GatewayCredentials {
   apiKey?: string;
@@ -223,8 +210,24 @@ function createClient(credentials: GatewayCredentials): ITGlueClient {
   });
 }
 
-// Define available tools
-server.setRequestHandler(ListToolsRequestSchema, async () => {
+/**
+ * Create a fresh MCP Server with all tool handlers registered.
+ * Called per-request in HTTP (stateless) mode so each initialize gets a clean server.
+ */
+function createMcpServer(): Server {
+  const server = new Server(
+    {
+      name: "itglue-mcp",
+      version: "1.0.0",
+    },
+    {
+      capabilities: {
+        tools: {},
+      },
+    }
+  );
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       // Organizations
@@ -762,10 +765,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+  return server;
+}
+
 /**
  * Start with stdio transport (default for local/CLI usage)
  */
 async function startStdioTransport(): Promise<void> {
+  const server = createMcpServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("IT Glue MCP server running on stdio");
@@ -779,11 +786,6 @@ async function startHttpTransport(): Promise<void> {
   const port = parseInt(process.env.MCP_HTTP_PORT || "8080", 10);
   const host = process.env.MCP_HTTP_HOST || "0.0.0.0";
   const isGatewayMode = process.env.AUTH_MODE === "gateway";
-
-  const httpTransport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-    enableJsonResponse: true,
-  });
 
   const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -802,8 +804,19 @@ async function startHttpTransport(): Promise<void> {
       return;
     }
 
-    // MCP endpoint
+    // MCP endpoint — stateless: fresh server + transport per request
     if (url.pathname === "/mcp") {
+      // Only POST is supported in stateless mode
+      if (req.method !== "POST") {
+        res.writeHead(405, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Method not allowed" },
+          id: null,
+        }));
+        return;
+      }
+
       // In gateway mode, extract credentials from headers
       if (isGatewayMode) {
         const headers = req.headers as Record<string, string | string[] | undefined>;
@@ -816,15 +829,13 @@ async function startHttpTransport(): Promise<void> {
           res.end(
             JSON.stringify({
               error: "Missing credentials",
-              message:
-                "Gateway mode requires X-ITGlue-API-Key header",
+              message: "Gateway mode requires X-ITGlue-API-Key header",
               required: ["X-ITGlue-API-Key"],
             })
           );
           return;
         }
 
-        // Set environment variables for this request so getCredentialsFromEnv() picks them up
         process.env.ITGLUE_API_KEY = apiKey;
 
         const baseUrl = headers["x-itglue-base-url"] as string | undefined;
@@ -838,7 +849,32 @@ async function startHttpTransport(): Promise<void> {
         }
       }
 
-      httpTransport.handleRequest(req, res);
+      // Stateless: create fresh server + transport for each request
+      const server = createMcpServer();
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+        enableJsonResponse: true,
+      });
+
+      res.on("close", () => {
+        transport.close();
+        server.close();
+      });
+
+      server.connect(transport as unknown as Transport).then(() => {
+        transport.handleRequest(req, res);
+      }).catch((err) => {
+        console.error("MCP transport error:", err);
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            jsonrpc: "2.0",
+            error: { code: -32603, message: "Internal error" },
+            id: null,
+          }));
+        }
+      });
+
       return;
     }
 
@@ -846,8 +882,6 @@ async function startHttpTransport(): Promise<void> {
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "Not found", endpoints: ["/mcp", "/health"] }));
   });
-
-  await server.connect(httpTransport as unknown as Transport);
 
   await new Promise<void>((resolve) => {
     httpServer.listen(port, host, () => {
@@ -866,7 +900,6 @@ async function startHttpTransport(): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       httpServer.close((err) => (err ? reject(err) : resolve()));
     });
-    await server.close();
     process.exit(0);
   };
 
