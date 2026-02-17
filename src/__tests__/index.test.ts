@@ -285,7 +285,7 @@ describe("Tool Definitions", () => {
     { name: "get_configuration", requiredFields: ["id"], properties: ["id"] },
     { name: "search_passwords", requiredFields: [] as string[], properties: ["organization_id", "name", "password_category_id", "url", "username", "page_size", "page_number", "sort"] },
     { name: "get_password", requiredFields: ["id"], properties: ["id", "show_password"] },
-    { name: "search_documents", requiredFields: [] as string[], properties: ["organization_id", "name", "page_size", "page_number", "sort"] },
+    { name: "search_documents", requiredFields: ["organization_id"] as string[], properties: ["organization_id", "name", "page_size", "page_number", "sort"] },
     { name: "search_flexible_assets", requiredFields: ["flexible_asset_type_id"], properties: ["flexible_asset_type_id", "organization_id", "name", "page_size", "page_number", "sort"] },
     { name: "itglue_health_check", requiredFields: [] as string[], properties: [] as string[] },
   ];
@@ -659,21 +659,21 @@ describe("Tool Handler Integration", () => {
 
       mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
 
-      const response = await fetch("https://api.itglue.com/documents?filter[organization-id]=123");
+      const response = await fetch("https://api.itglue.com/organizations/123/relationships/documents?page[size]=50&page[number]=1");
       const json = (await response.json()) as JsonApiResponse;
 
       expect((json.data as JsonApiResource[]).length).toBe(2);
       expect((json.data as JsonApiResource[])[0].attributes?.name).toBe("Network Diagram");
     });
 
-    it("should search documents by name", async () => {
+    it("should search documents by name within organization", async () => {
       const mockData = createJsonApiResponse([
         { id: "1", type: "documents", attributes: { name: "Security Policy" } },
       ]);
 
       mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
 
-      const response = await fetch("https://api.itglue.com/documents?filter[name]=Security");
+      const response = await fetch("https://api.itglue.com/organizations/123/relationships/documents?filter[name]=Security&page[size]=50&page[number]=1");
       const json = (await response.json()) as JsonApiResponse;
 
       expect((json.data as JsonApiResource[])[0].attributes?.name).toBe("Security Policy");

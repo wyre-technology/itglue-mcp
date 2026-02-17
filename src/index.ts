@@ -412,13 +412,13 @@ function createMcpServer(): Server {
       // Documents
       {
         name: "search_documents",
-        description: "Search for documents in IT Glue",
+        description: "Search for documents in IT Glue (scoped to an organization)",
         inputSchema: {
           type: "object",
           properties: {
             organization_id: {
               type: "number",
-              description: "Filter by organization ID",
+              description: "Organization ID (required — documents are scoped to organizations)",
             },
             name: {
               type: "string",
@@ -437,7 +437,7 @@ function createMcpServer(): Server {
               description: "Sort field (prefix with - for descending)",
             },
           },
-          required: [],
+          required: ["organization_id"],
         },
       },
       // Flexible Assets
@@ -659,10 +659,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // Documents
       case "search_documents": {
+        if (!args?.organization_id) {
+          return {
+            content: [{ type: "text", text: "Error: organization_id is required for search_documents" }],
+            isError: true,
+          };
+        }
+
         const params: Record<string, unknown> = {};
         const filter: Record<string, unknown> = {};
 
-        if (args?.organization_id) filter.organizationId = args.organization_id;
         if (args?.name) filter.name = args.name;
 
         if (Object.keys(filter).length > 0) params.filter = filter;
@@ -672,7 +678,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           number: (args?.page_number as number) || 1,
         };
 
-        const result = await client.request("/documents", params);
+        const result = await client.request(
+          `/organizations/${args.organization_id}/relationships/documents`,
+          params
+        );
         return {
           content: [
             {
