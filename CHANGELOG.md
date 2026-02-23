@@ -1,3 +1,10 @@
+## [1.1.1](https://github.com/wyre-technology/itglue-mcp/compare/v1.1.0...v1.1.1) (2026-02-23)
+
+
+### Bug Fixes
+
+* quote MCPB bundle filename to prevent shell glob expansion failure ([8047aa8](https://github.com/wyre-technology/itglue-mcp/commit/8047aa8c3e257bfdbe3d7e3cec60ea3cb666fb19))
+
 # [1.1.0](https://github.com/wyre-technology/itglue-mcp/compare/v1.0.0...v1.1.0) (2026-02-18)
 
 
