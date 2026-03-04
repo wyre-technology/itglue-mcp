@@ -19,6 +19,10 @@ function run(cmd, opts = {}) {
 }
 
 try {
+  // 0. Install dependencies (including devDeps needed for build)
+  console.log('\n=== Installing dependencies ===');
+  run('npm ci', { cwd: ROOT });
+
   // 1. Build the project
   console.log('\n=== Building project ===');
   run('npm run build', { cwd: ROOT });
