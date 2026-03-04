@@ -1,3 +1,10 @@
+## [1.2.4](https://github.com/wyre-technology/itglue-mcp/compare/v1.2.3...v1.2.4) (2026-03-04)
+
+
+### Bug Fixes
+
+* install dependencies before build in pack-mcpb.cjs ([5243ffb](https://github.com/wyre-technology/itglue-mcp/commit/5243ffb149d22ac1da64ff0b14e8b26115dc47ea))
+
 ## [1.2.3](https://github.com/wyre-technology/itglue-mcp/compare/v1.2.2...v1.2.3) (2026-03-04)
 
 
