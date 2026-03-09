@@ -15,6 +15,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { setServerRef } from "./utils/server-ref.js";
+import { elicitText } from "./utils/elicitation.js";
 
 // IT Glue region configuration
 type ITGlueRegion = "us" | "eu" | "au";
@@ -226,6 +228,7 @@ function createMcpServer(): Server {
       },
     }
   );
+  setServerRef(server);
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
@@ -515,7 +518,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const params: Record<string, unknown> = {};
         const filter: Record<string, unknown> = {};
 
-        if (args?.name) filter.name = args.name;
+        // If no search term provided, elicit one from the user
+        let orgName = args?.name as string | undefined;
+        if (!orgName && !args?.organization_type_id && !args?.organization_status_id && !args?.psa_id) {
+          const elicited = await elicitText(
+            "Which organization are you looking for?",
+            "name",
+            "Enter an organization name to search for, or leave blank to list all"
+          );
+          if (elicited) {
+            orgName = elicited;
+          }
+        }
+
+        if (orgName) filter.name = orgName;
         if (args?.organization_type_id) filter.organizationTypeId = args.organization_type_id;
         if (args?.organization_status_id) filter.organizationStatusId = args.organization_status_id;
         if (args?.psa_id) filter.psaId = args.psa_id;
@@ -561,7 +577,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const params: Record<string, unknown> = {};
         const filter: Record<string, unknown> = {};
 
-        if (args?.organization_id) filter.organizationId = args.organization_id;
+        let configOrgId = args?.organization_id as number | undefined;
+
+        // If no organization_id, elicit an organization name search to find it
+        if (!configOrgId) {
+          const orgSearch = await elicitText(
+            "Configurations are easier to find when scoped to an organization. Which organization?",
+            "organization",
+            "Enter an organization name to search for"
+          );
+          if (orgSearch) {
+            // Search for the organization to get its ID
+            const orgResult = await client.request("/organizations", {
+              filter: { name: orgSearch },
+              page: { size: 5, number: 1 },
+            });
+            const orgs = orgResult.data as Array<Record<string, unknown>>;
+            if (orgs.length === 1) {
+              configOrgId = Number(orgs[0].id);
+            } else if (orgs.length > 1) {
+              // Return the org list so the LLM can ask the user to pick
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `Multiple organizations match "${orgSearch}". Please re-run with a specific organization_id:\n\n${JSON.stringify(orgs.map((o) => ({ id: o.id, name: o.name })), null, 2)}`,
+                  },
+                ],
+              };
+            }
+          }
+        }
+
+        if (configOrgId) filter.organizationId = configOrgId;
         if (args?.name) filter.name = args.name;
         if (args?.configuration_type_id) filter.configurationTypeId = args.configuration_type_id;
         if (args?.configuration_status_id) filter.configurationStatusId = args.configuration_status_id;
@@ -610,7 +658,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const params: Record<string, unknown> = {};
         const filter: Record<string, unknown> = {};
 
-        if (args?.organization_id) filter.organizationId = args.organization_id;
+        let pwOrgId = args?.organization_id as number | undefined;
+
+        // If no organization_id, elicit an organization name search to find it
+        if (!pwOrgId) {
+          const orgSearch = await elicitText(
+            "Passwords are easier to find when scoped to an organization. Which organization?",
+            "organization",
+            "Enter an organization name to search for"
+          );
+          if (orgSearch) {
+            // Search for the organization to get its ID
+            const orgResult = await client.request("/organizations", {
+              filter: { name: orgSearch },
+              page: { size: 5, number: 1 },
+            });
+            const orgs = orgResult.data as Array<Record<string, unknown>>;
+            if (orgs.length === 1) {
+              pwOrgId = Number(orgs[0].id);
+            } else if (orgs.length > 1) {
+              // Return the org list so the LLM can ask the user to pick
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `Multiple organizations match "${orgSearch}". Please re-run with a specific organization_id:\n\n${JSON.stringify(orgs.map((o) => ({ id: o.id, name: o.name })), null, 2)}`,
+                  },
+                ],
+              };
+            }
+          }
+        }
+
+        if (pwOrgId) filter.organizationId = pwOrgId;
         if (args?.name) filter.name = args.name;
         if (args?.password_category_id) filter.passwordCategoryId = args.password_category_id;
         if (args?.url) filter.url = args.url;
