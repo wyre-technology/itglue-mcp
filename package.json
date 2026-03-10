@@ -1,6 +1,6 @@
 {
   "name": "@wyre-technology/itglue-mcp",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "IT Glue MCP server for Claude",
   "type": "module",
   "main": "dist/index.js",

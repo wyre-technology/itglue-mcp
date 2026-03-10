@@ -1,3 +1,10 @@
+# [1.5.0](https://github.com/wyre-technology/itglue-mcp/compare/v1.4.0...v1.5.0) (2026-03-10)
+
+
+### Features
+
+* **elicitation:** add MCP elicitation support with graceful fallback ([#2](https://github.com/wyre-technology/itglue-mcp/issues/2)) ([a134ce7](https://github.com/wyre-technology/itglue-mcp/commit/a134ce7e6c55bf7a738e14c0464f22190bfe2a24))
+
 # [1.4.0](https://github.com/wyre-technology/itglue-mcp/compare/v1.3.0...v1.4.0) (2026-03-09)
 
 
