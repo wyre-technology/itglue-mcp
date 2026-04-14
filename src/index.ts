@@ -17,6 +17,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { setServerRef } from "./utils/server-ref.js";
 import { elicitText } from "./utils/elicitation.js";
+import { registerPromptHandlers } from "./prompts.js";
 
 // IT Glue region configuration
 type ITGlueRegion = "us" | "eu" | "au";
@@ -300,10 +301,14 @@ function createMcpServer(credentialOverrides?: GatewayCredentials): Server {
     {
       capabilities: {
         tools: {},
+        prompts: {},
       },
     }
   );
   setServerRef(server);
+
+  // Register prompt handlers
+  registerPromptHandlers(server);
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
