@@ -1046,7 +1046,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               type: "documents",
               attributes: {
                 name: args.name,
-                ...(args.content ? { content: args.content } : {}),
+                ...(args.content !== undefined ? { content: args.content } : {}),
               },
             },
           }
@@ -1099,6 +1099,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               attributes: {
                 "section-type": apiSectionType,
                 content: args.content,
+              },
+              relationships: {
+                resource: {
+                  data: {
+                    type: "documents",
+                    id: String(args.document_id),
+                  },
+                },
               },
             },
           }
