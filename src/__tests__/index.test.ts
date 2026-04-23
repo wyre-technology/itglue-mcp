@@ -746,13 +746,13 @@ describe("Tool Handler Integration", () => {
 
       const sectionBody = JSON.parse(mockFetch.mock.calls[1][1].body);
       expect(sectionBody.data.type).toBe("document-sections");
-      expect(sectionBody.data.attributes["section-type"]).toBe("Document::Text");
+      // IT Glue stores the section type in `resource_type`, not `section-type`.
+      // Verified live 2026-04-23: `section-type` is ignored on write and a
+      // `relationships.resource` binding triggers a 400.
+      expect(sectionBody.data.attributes.resource_type).toBe("Document::Text");
       expect(sectionBody.data.attributes.content).toBe("<h1>Hello</h1><p>World</p>");
-      // Relationship binding is required by IT Glue (see issue #7 bug 2).
-      expect(sectionBody.data.relationships.resource.data).toEqual({
-        type: "documents",
-        id: "23350960",
-      });
+      expect(sectionBody.data.attributes).not.toHaveProperty("section-type");
+      expect(sectionBody.data).not.toHaveProperty("relationships");
     });
 
     it("skips section POST when content is empty string", async () => {
