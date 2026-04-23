@@ -16,6 +16,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
+// Importing from ../index pulls in the production helpers. The module guards
+// its main() bootstrap on NODE_ENV=test so this import does not start an MCP
+// server during tests.
+import { createDocumentWithContent, ITGlueClient } from "../index.js";
+
 // Store original env vars
 const originalEnv = { ...process.env };
 
@@ -688,182 +693,99 @@ describe("Tool Handler Integration", () => {
     });
   });
 
-  describe("create_document", () => {
-    it("should create a document with name only", async () => {
-      const mockDoc = { id: "789", type: "documents", attributes: { name: "My Document", content: null } };
-      mockFetch.mockResolvedValueOnce(createMockResponse({ data: mockDoc, meta: {} }));
+  // Regression tests for issue #7: document creation must persist content.
+  // IT Glue's Documents API ignores a top-level `content` attribute on POST —
+  // documents are section-structured, so the body only materialises when a
+  // follow-up document_section is POSTed. The helper below orchestrates that
+  // two-step flow; these tests exercise it directly against a mocked fetch so
+  // the assertions cover the real production code path (not a re-construction
+  // of it).
+  describe("createDocumentWithContent", () => {
+    function newClient(): ITGlueClient {
+      return new ITGlueClient({ apiKey: "test-api-key", region: "us" });
+    }
 
-      const response = await fetch("https://api.itglue.com/organizations/123/relationships/documents", {
-        method: "POST",
-        headers: { "Content-Type": "application/vnd.api+json" },
-        body: JSON.stringify({
-          data: {
-            type: "documents",
-            attributes: {
-              name: "My Document"
-            }
-          }
-        }),
+    it("POSTs only the document when content is omitted", async () => {
+      mockFetch.mockResolvedValueOnce(createMockResponse({
+        data: { id: "789", type: "documents", attributes: { name: "Doc" } },
+      }));
+
+      await createDocumentWithContent(newClient(), {
+        organization_id: 1765329,
+        name: "Doc",
       });
 
-      expect(mockFetch).toHaveBeenCalledWith(
-        "https://api.itglue.com/organizations/123/relationships/documents",
-        expect.objectContaining({ method: "POST" })
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockFetch.mock.calls[0][0]).toContain(
+        "/organizations/1765329/relationships/documents"
       );
-      expect(response.ok).toBe(true);
     });
 
-    it("should create a document with name and content", async () => {
-      const mockDoc = { id: "789", type: "documents", attributes: { name: "My Document", content: "<p>Test content</p>" } };
-      mockFetch.mockResolvedValueOnce(createMockResponse({ data: mockDoc, meta: {} }));
+    it("POSTs document then section when content is provided", async () => {
+      mockFetch
+        .mockResolvedValueOnce(createMockResponse({
+          data: { id: "23350960", type: "documents", attributes: { name: "Doc" } },
+        }))
+        .mockResolvedValueOnce(createMockResponse({
+          data: { id: "1001", type: "document-sections", attributes: {} },
+        }));
 
-      const response = await fetch("https://api.itglue.com/organizations/123/relationships/documents", {
-        method: "POST",
-        headers: { "Content-Type": "application/vnd.api+json" },
-        body: JSON.stringify({
-          data: {
-            type: "documents",
-            attributes: {
-              name: "My Document",
-              content: "<p>Test content</p>"
-            }
-          }
-        }),
+      await createDocumentWithContent(newClient(), {
+        organization_id: 1765329,
+        name: "Doc",
+        content: "<h1>Hello</h1><p>World</p>",
       });
 
-      expect(mockFetch).toHaveBeenCalledWith(
-        "https://api.itglue.com/organizations/123/relationships/documents",
-        expect.objectContaining({ method: "POST" })
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(mockFetch.mock.calls[0][0]).toContain(
+        "/organizations/1765329/relationships/documents"
       );
-      expect(response.ok).toBe(true);
+      expect(mockFetch.mock.calls[1][0]).toContain(
+        "/documents/23350960/relationships/sections"
+      );
+
+      const sectionBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(sectionBody.data.type).toBe("document-sections");
+      expect(sectionBody.data.attributes["section-type"]).toBe("Document::Text");
+      expect(sectionBody.data.attributes.content).toBe("<h1>Hello</h1><p>World</p>");
+      // Relationship binding is required by IT Glue (see issue #7 bug 2).
+      expect(sectionBody.data.relationships.resource.data).toEqual({
+        type: "documents",
+        id: "23350960",
+      });
     });
 
-    // BUG TEST #1: This test verifies that content field is included in POST payload when provided
-    it("should send content field to IT Glue API when provided", async () => {
-      let capturedBody: string = "";
+    it("skips section POST when content is empty string", async () => {
+      mockFetch.mockResolvedValueOnce(createMockResponse({
+        data: { id: "789", type: "documents", attributes: { name: "Doc" } },
+      }));
 
-      const mockDoc = { id: "789", type: "documents", attributes: { name: "My Document", content: "<p>Test content</p>" } };
-      mockFetch.mockImplementation((_url: string, options: RequestInit) => {
-        capturedBody = options.body as string;
-        return createMockResponse({ data: mockDoc, meta: {} });
+      await createDocumentWithContent(newClient(), {
+        organization_id: 1,
+        name: "Doc",
+        content: "",
       });
 
-      // Test the actual payload that the create_document handler would send
-      await fetch("https://api.itglue.com/organizations/123/relationships/documents", {
-        method: "POST",
-        headers: { "Content-Type": "application/vnd.api+json" },
-        body: JSON.stringify({
-          data: {
-            type: "documents",
-            attributes: {
-              name: "My Document",
-              content: "<p>Test content</p>"
-            }
-          }
-        }),
-      });
-
-      // Verify that content is included in the request body
-      const parsedBody = JSON.parse(capturedBody);
-      expect(parsedBody.data.attributes.content).toBe("<p>Test content</p>");
-      expect(parsedBody.data.attributes.name).toBe("My Document");
+      expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
-    // BUG TEST #1b: This test demonstrates the potential issue with content persistence
-    it("should omit content field from payload when not provided", async () => {
-      let capturedBody: string = "";
+    it("returns the document (not the section) as the caller-visible result", async () => {
+      mockFetch
+        .mockResolvedValueOnce(createMockResponse({
+          data: { id: "23350960", type: "documents", attributes: { name: "Doc" } },
+        }))
+        .mockResolvedValueOnce(createMockResponse({
+          data: { id: "1001", type: "document-sections", attributes: {} },
+        }));
 
-      const mockDoc = { id: "789", type: "documents", attributes: { name: "My Document" } };
-      mockFetch.mockImplementation((_url: string, options: RequestInit) => {
-        capturedBody = options.body as string;
-        return createMockResponse({ data: mockDoc, meta: {} });
+      const result = await createDocumentWithContent(newClient(), {
+        organization_id: 1,
+        name: "Doc",
+        content: "<p>x</p>",
       });
 
-      // Test the actual payload when no content is provided
-      await fetch("https://api.itglue.com/organizations/123/relationships/documents", {
-        method: "POST",
-        headers: { "Content-Type": "application/vnd.api+json" },
-        body: JSON.stringify({
-          data: {
-            type: "documents",
-            attributes: {
-              name: "My Document"
-              // No content field
-            }
-          }
-        }),
-      });
-
-      // Verify that content is NOT included when not provided
-      const parsedBody = JSON.parse(capturedBody);
-      expect(parsedBody.data.attributes.content).toBeUndefined();
-      expect(parsedBody.data.attributes.name).toBe("My Document");
-    });
-
-    // BUG TEST #1c: This test demonstrates the ACTUAL bug - empty string content is not sent
-    it("should send content field even when it's an empty string", async () => {
-      let capturedBody: string = "";
-
-      const mockDoc = { id: "789", type: "documents", attributes: { name: "My Document", content: "" } };
-      mockFetch.mockImplementation((_url: string, options: RequestInit) => {
-        capturedBody = options.body as string;
-        return createMockResponse({ data: mockDoc, meta: {} });
-      });
-
-      // Test what happens when content is an empty string - this should still be sent!
-      await fetch("https://api.itglue.com/organizations/123/relationships/documents", {
-        method: "POST",
-        headers: { "Content-Type": "application/vnd.api+json" },
-        body: JSON.stringify({
-          data: {
-            type: "documents",
-            attributes: {
-              name: "My Document",
-              content: ""  // Empty string should still be included
-            }
-          }
-        }),
-      });
-
-      // This test should PASS - empty string content should be included in payload
-      const parsedBody = JSON.parse(capturedBody);
-      expect(parsedBody.data.attributes.content).toBe("");  // Empty string, not undefined
-      expect(parsedBody.data.attributes.name).toBe("My Document");
-    });
-
-    // BUG TEST #1d: This test should FAIL initially - it expects empty string content to be included
-    it("should include empty string content in payload (will fail until bug is fixed)", async () => {
-      let capturedBody: string = "";
-
-      const mockDoc = { id: "789", type: "documents", attributes: { name: "My Document", content: "" } };
-      mockFetch.mockImplementation((_url: string, options: RequestInit) => {
-        capturedBody = options.body as string;
-        return createMockResponse({ data: mockDoc, meta: {} });
-      });
-
-      // Test what the FIXED implementation should send: content included even if empty string
-      const args = { name: "My Document", content: "" };  // Empty string content
-      const payload = {
-        data: {
-          type: "documents",
-          attributes: {
-            name: args.name,
-            // FIXED version should be: ...(args.content !== undefined ? { content: args.content } : {}),
-            ...(args.content !== undefined ? { content: args.content } : {}),
-          }
-        }
-      };
-
-      await fetch("https://api.itglue.com/organizations/123/relationships/documents", {
-        method: "POST",
-        headers: { "Content-Type": "application/vnd.api+json" },
-        body: JSON.stringify(payload),
-      });
-
-      // After the fix, this should pass: empty string content should be included
-      const parsedBody = JSON.parse(capturedBody);
-      expect(parsedBody.data.attributes.content).toBe("");  // Should be empty string, not undefined
-      expect(parsedBody.data.attributes.name).toBe("My Document");
+      expect((result as { id: string; type: string }).id).toBe("23350960");
+      expect((result as { id: string; type: string }).type).toBe("documents");
     });
   });
 
