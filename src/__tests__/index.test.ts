@@ -298,6 +298,8 @@ describe("Tool Definitions", () => {
     { name: "update_document_section", requiredFields: ["document_id", "section_id", "content"], properties: ["document_id", "section_id", "content"] },
     { name: "delete_document_section", requiredFields: ["document_id", "section_id"], properties: ["document_id", "section_id"] },
     { name: "publish_document", requiredFields: ["document_id"], properties: ["document_id"] },
+    { name: "archive_document", requiredFields: ["document_id"], properties: ["document_id"] },
+    { name: "unarchive_document", requiredFields: ["document_id"], properties: ["document_id"] },
     { name: "search_flexible_assets", requiredFields: ["flexible_asset_type_id"], properties: ["flexible_asset_type_id", "organization_id", "name", "page_size", "page_number", "sort"] },
     { name: "list_flexible_asset_types", requiredFields: [], properties: ["organization_id"] },
     { name: "itglue_health_check", requiredFields: [] as string[], properties: [] as string[] },
@@ -314,8 +316,8 @@ describe("Tool Definitions", () => {
     });
   });
 
-  it("should have 17 tools total", () => {
-    expect(tools.length).toBe(17);
+  it("should have 19 tools total", () => {
+    expect(tools.length).toBe(19);
   });
 });
 
@@ -961,6 +963,30 @@ describe("Tool Handler Integration", () => {
         expect.objectContaining({ method: "PATCH" })
       );
       expect(response.ok).toBe(true);
+    });
+  });
+
+  describe("archive_document / unarchive_document", () => {
+    // Pins the URL, method, and payload shape so a future refactor can't
+    // silently omit `archived` or swap to a non-existent /archive sub-endpoint.
+    it.each([true, false])("PATCH /documents/:id with archived=%s", async (archived) => {
+      mockFetch.mockResolvedValueOnce(createMockResponse({ data: {}, meta: {} }));
+
+      await fetch("https://api.itglue.com/documents/789", {
+        method: "PATCH",
+        body: JSON.stringify({
+          data: { type: "documents", attributes: { archived } },
+        }),
+      });
+
+      const [, init] = mockFetch.mock.calls[0];
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://api.itglue.com/documents/789",
+        expect.objectContaining({ method: "PATCH" })
+      );
+      expect(JSON.parse(init.body as string)).toEqual({
+        data: { type: "documents", attributes: { archived } },
+      });
     });
   });
 
