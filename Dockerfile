@@ -14,6 +14,8 @@ RUN npm run build
 
 FROM node:20-alpine AS runner
 
+LABEL io.modelcontextprotocol.server.name="io.github.wyre-technology/itglue-mcp"
+
 WORKDIR /app
 
 ENV NODE_ENV=production
