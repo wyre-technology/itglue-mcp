@@ -654,6 +654,34 @@ function createMcpServer(): Server {
           required: ["document_id"],
         },
       },
+      {
+        name: "archive_document",
+        description: "Archive an IT Glue document (soft delete — hides it from normal views but keeps it recoverable). Use unarchive_document to restore.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            document_id: {
+              type: "number",
+              description: "The document ID to archive",
+            },
+          },
+          required: ["document_id"],
+        },
+      },
+      {
+        name: "unarchive_document",
+        description: "Restore a previously archived IT Glue document so it appears in normal views again.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            document_id: {
+              type: "number",
+              description: "The document ID to unarchive",
+            },
+          },
+          required: ["document_id"],
+        },
+      },
       // Flexible Assets
       {
         name: "list_flexible_asset_types",
@@ -1154,7 +1182,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{ type: "text", text: JSON.stringify(published, null, 2) }],
         };
       }
-
+case "archive_document":
+      case "unarchive_document": {
+        if (!args?.document_id) {
+          return {
+            content: [{ type: "text", text: "Error: document_id is required" }],
+            isError: true,
+          };
+        }
+        const archived = name === "archive_document";
+        const result = await client.patch(`/documents/${args.document_id}`, {
+          data: {
+            type: "documents",
+            attributes: { archived },
+          },
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
       // Flexible Assets
       case "list_flexible_asset_types": {
         const params: Record<string, unknown> = {};
