@@ -682,6 +682,157 @@ function createMcpServer(): Server {
           required: ["document_id"],
         },
       },
+      // SSL Certificates
+      {
+        name: "search_ssl_certificates",
+        description: "Search for SSL certificates in IT Glue scoped to an organization. Returns expiration dates — use to audit expiring or expired certs across clients.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            organization_id: {
+              type: "number",
+              description: "Organization ID to scope the search (required)",
+            },
+            name: {
+              type: "string",
+              description: "Filter by certificate name (partial match)",
+            },
+            expiration_date: {
+              type: "string",
+              description: "Filter by expiration date range (format: 'start_date,end_date' e.g. '2026-01-01,2026-12-31'). Use * for open-ended.",
+            },
+            page_size: {
+              type: "number",
+              description: "Number of results per page (max 1000, default 50)",
+            },
+            page_number: {
+              type: "number",
+              description: "Page number to retrieve (default 1)",
+            },
+          },
+          required: ["organization_id"],
+        },
+      },
+      // Domains
+      {
+        name: "search_domains",
+        description: "Search for domains in IT Glue scoped to an organization. Returns expiration dates — use to audit expiring or lapsed domains that could be hijacked.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            organization_id: {
+              type: "number",
+              description: "Organization ID to scope the search (required)",
+            },
+            name: {
+              type: "string",
+              description: "Filter by domain name (partial match)",
+            },
+            expiration_date: {
+              type: "string",
+              description: "Filter by expiration date range (format: 'start_date,end_date' e.g. '2026-01-01,2026-12-31'). Use * for open-ended.",
+            },
+            page_size: {
+              type: "number",
+              description: "Number of results per page (max 1000, default 50)",
+            },
+            page_number: {
+              type: "number",
+              description: "Page number to retrieve (default 1)",
+            },
+          },
+          required: ["organization_id"],
+        },
+      },
+      // Document Folders
+      {
+        name: "list_document_folders",
+        description: "List all document folders for an organization in IT Glue. Call this first to get folder IDs, then use search_documents with document_folder_id to retrieve documents inside each folder.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            organization_id: {
+              type: "number",
+              description: "Organization ID to list folders for (required)",
+            },
+            page_size: {
+              type: "number",
+              description: "Number of results per page (max 1000, default 50)",
+            },
+            page_number: {
+              type: "number",
+              description: "Page number to retrieve (default 1)",
+            },
+          },
+          required: ["organization_id"],
+        },
+      },
+      // Contacts
+      {
+        name: "search_contacts",
+        description: "Search for contacts in IT Glue scoped to an organization. Returns names, emails, phone numbers, and contact type.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            organization_id: {
+              type: "number",
+              description: "Organization ID to scope the search (required)",
+            },
+            name: {
+              type: "string",
+              description: "Filter by contact name (partial match)",
+            },
+            email: {
+              type: "string",
+              description: "Filter by email address",
+            },
+            page_size: {
+              type: "number",
+              description: "Number of results per page (max 1000, default 50)",
+            },
+            page_number: {
+              type: "number",
+              description: "Page number to retrieve (default 1)",
+            },
+            sort: {
+              type: "string",
+              description: "Sort field (prefix with - for descending, e.g. '-name')",
+            },
+          },
+          required: ["organization_id"],
+        },
+      },
+      // Locations
+      {
+        name: "search_locations",
+        description: "Search for locations (physical sites/offices) in IT Glue scoped to an organization.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            organization_id: {
+              type: "number",
+              description: "Organization ID to scope the search (required)",
+            },
+            name: {
+              type: "string",
+              description: "Filter by location name (partial match)",
+            },
+            city: {
+              type: "string",
+              description: "Filter by city",
+            },
+            page_size: {
+              type: "number",
+              description: "Number of results per page (max 1000, default 50)",
+            },
+            page_number: {
+              type: "number",
+              description: "Page number to retrieve (default 1)",
+            },
+          },
+          required: ["organization_id"],
+        },
+      },
       // Flexible Assets
       {
         name: "list_flexible_asset_types",
@@ -1197,6 +1348,127 @@ case "archive_document":
             attributes: { archived },
           },
         });
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+        case "search_ssl_certificates": {
+        if (!args?.organization_id) {
+          return {
+            content: [{ type: "text", text: "Error: organization_id is required" }],
+            isError: true,
+          };
+        }
+        const params: Record<string, unknown> = {};
+        const filter: Record<string, unknown> = {};
+        if (args?.name) filter.name = args.name;
+        if (args?.expiration_date) filter.expirationDate = args.expiration_date;
+        if (Object.keys(filter).length > 0) params.filter = filter;
+        params.page = {
+          size: (args?.page_size as number) || 50,
+          number: (args?.page_number as number) || 1,
+        };
+        const result = await client.request(
+          `/organizations/${args.organization_id}/relationships/ssl_certificates`,
+          params
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case "search_domains": {
+        if (!args?.organization_id) {
+          return {
+            content: [{ type: "text", text: "Error: organization_id is required" }],
+            isError: true,
+          };
+        }
+        const params: Record<string, unknown> = {};
+        const filter: Record<string, unknown> = {};
+        if (args?.name) filter.name = args.name;
+        if (args?.expiration_date) filter.expirationDate = args.expiration_date;
+        if (Object.keys(filter).length > 0) params.filter = filter;
+        params.page = {
+          size: (args?.page_size as number) || 50,
+          number: (args?.page_number as number) || 1,
+        };
+        const result = await client.request(
+          `/organizations/${args.organization_id}/relationships/domains`,
+          params
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case "list_document_folders": {
+        if (!args?.organization_id) {
+          return {
+            content: [{ type: "text", text: "Error: organization_id is required" }],
+            isError: true,
+          };
+        }
+        const params: Record<string, unknown> = {};
+        params.page = {
+          size: (args?.page_size as number) || 50,
+          number: (args?.page_number as number) || 1,
+        };
+        const result = await client.request(
+          `/organizations/${args.organization_id}/relationships/document_folders`,
+          params
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case "search_contacts": {
+        if (!args?.organization_id) {
+          return {
+            content: [{ type: "text", text: "Error: organization_id is required" }],
+            isError: true,
+          };
+        }
+        const params: Record<string, unknown> = {};
+        const filter: Record<string, unknown> = {};
+        if (args?.name) filter.name = args.name;
+        if (args?.email) filter.email = args.email;
+        if (Object.keys(filter).length > 0) params.filter = filter;
+        if (args?.sort) params.sort = args.sort;
+        params.page = {
+          size: (args?.page_size as number) || 50,
+          number: (args?.page_number as number) || 1,
+        };
+        const result = await client.request(
+          `/organizations/${args.organization_id}/relationships/contacts`,
+          params
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case "search_locations": {
+        if (!args?.organization_id) {
+          return {
+            content: [{ type: "text", text: "Error: organization_id is required" }],
+            isError: true,
+          };
+        }
+        const params: Record<string, unknown> = {};
+        const filter: Record<string, unknown> = {};
+        if (args?.name) filter.name = args.name;
+        if (args?.city) filter.city = args.city;
+        if (Object.keys(filter).length > 0) params.filter = filter;
+        params.page = {
+          size: (args?.page_size as number) || 50,
+          number: (args?.page_number as number) || 1,
+        };
+        const result = await client.request(
+          `/organizations/${args.organization_id}/relationships/locations`,
+          params
+        );
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
