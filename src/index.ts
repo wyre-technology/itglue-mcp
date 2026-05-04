@@ -681,7 +681,17 @@ function createMcpServer(credentialOverrides?: GatewayCredentials): Server {
       },
       {
         name: "delete_document_section",
-        description: "Delete a section from an IT Glue document. Call publish_document after editing.",
+        description:
+          "⚠ DESTRUCTIVE — IRREVERSIBLE. Permanently deletes a section from an IT Glue document. " +
+          "This action cannot be undone. Call publish_document after editing. " +
+          "Confirm with the user before invoking.",
+        annotations: {
+          title: "Delete document section (irreversible)",
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -713,7 +723,17 @@ function createMcpServer(credentialOverrides?: GatewayCredentials): Server {
       },
       {
         name: "archive_document",
-        description: "Archive an IT Glue document (soft delete — hides it from normal views but keeps it recoverable). Use unarchive_document to restore.",
+        description:
+          "⚠ HIGH-IMPACT. Archives an IT Glue document (soft delete — hides it from normal views " +
+          "but keeps it recoverable). Use unarchive_document to restore. " +
+          "Confirm with the user before invoking.",
+        annotations: {
+          title: "Archive document (reversible)",
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
         inputSchema: {
           type: "object",
           properties: {
@@ -727,7 +747,17 @@ function createMcpServer(credentialOverrides?: GatewayCredentials): Server {
       },
       {
         name: "unarchive_document",
-        description: "Restore a previously archived IT Glue document so it appears in normal views again.",
+        description:
+          "⚠ HIGH-IMPACT. Restores a previously archived IT Glue document so it appears in " +
+          "normal views again. This makes the document visible to all users. " +
+          "Confirm with the user before invoking.",
+        annotations: {
+          title: "Unarchive document (reversible)",
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
         inputSchema: {
           type: "object",
           properties: {
