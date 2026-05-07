@@ -35,6 +35,7 @@ jobs:
     permissions:
       contents: write
       issues: write
+      packages: write
     outputs:
       version: ${{ steps.release-version.outputs.version }}
       released: ${{ steps.release-version.outputs.released }}
@@ -104,16 +105,6 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
-      - name: Resolve release version
-        id: version
-        env:
-          RELEASE_VERSION: ${{ needs.release.outputs.version }}
-        run: |
-          if [ -z "$RELEASE_VERSION" ]; then
-            echo "ERROR: needs.release.outputs.version is empty" >&2
-            exit 1
-          fi
-          echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
       - name: Build and push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6.19.2
         with:
@@ -122,7 +113,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:v${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository }}:v${{ needs.release.outputs.version }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -135,7 +126,7 @@ jobs:
           BUNDLE_NAME=$(node -p "require('./package.json').name.replace(/^@.*\\//, '')")
           npm install -g @anthropic-ai/mcpb
           npm run pack:mcpb
-          gh release upload "v${{ steps.version.outputs.version }}" "${BUNDLE_NAME}.mcpb" \
+          gh release upload "v${{ needs.release.outputs.version }}" "${BUNDLE_NAME}.mcpb" \
             --repo ${{ github.repository }} --clobber
 
       - name: Discord release notification
@@ -144,7 +135,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          VERSION="${{ needs.release.outputs.version }}"
           BODY=$(gh release view "v$VERSION" --json body --jq '.body' 2>/dev/null || echo "")
           SUMMARY=$(echo "$BODY" | sed '1,2d' | head -30 | cut -c1-1800)
           DESC="**${{ github.repository }}** — [v${VERSION}](https://github.com/${{ github.repository }}/releases/tag/v${VERSION})"$'\n'"${SUMMARY}"
