@@ -16,7 +16,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { setServerRef } from "./utils/server-ref.js";
-import { elicitText } from "./utils/elicitation.js";
+import { elicitText, elicitSelection } from "./utils/elicitation.js";
 import { registerPromptHandlers } from "./prompts.js";
 
 // IT Glue region configuration
@@ -286,14 +286,20 @@ export async function createDocumentWithContent(
     organization_id: number | string;
     name: string;
     content?: string;
+    document_folder_id?: number | string;
   }
 ): Promise<Record<string, unknown>> {
+  const attributes: Record<string, unknown> = { name: args.name };
+  if (args.document_folder_id !== undefined && args.document_folder_id !== null) {
+    attributes.document_folder_id = args.document_folder_id;
+  }
+
   const newDoc = await client.post<Record<string, unknown>>(
     `/organizations/${args.organization_id}/relationships/documents`,
     {
       data: {
         type: "documents",
-        attributes: { name: args.name },
+        attributes,
       },
     }
   );
@@ -312,6 +318,57 @@ export async function createDocumentWithContent(
   }
 
   return newDoc;
+}
+
+/**
+ * IT Glue document folder resource shape (subset we use). Folders can be
+ * nested via `parent-id`; the API serialises in kebab-case but tolerant code
+ * also accepts snake_case from cached/proxied responses.
+ */
+export interface DocumentFolderResource {
+  id: string;
+  attributes?: Record<string, unknown>;
+}
+
+/**
+ * Build the elicitation option list shown to users when no folder is supplied
+ * to `create_document`. The first option is always a `__root__` sentinel so
+ * users can explicitly choose "no folder" (distinct from cancelling). Other
+ * entries are labelled with breadcrumb paths (e.g. `Networking / Firewalls`)
+ * so duplicate folder names under different parents stay distinguishable, and
+ * the list is sorted alphabetically by label for predictable ordering.
+ *
+ * Cycle-safe: a folder whose parent chain loops back on itself stops walking
+ * at the repeat. Orphan folders (parent id pointing nowhere) are labelled by
+ * their own name only.
+ */
+export function buildFolderPickerOptions(
+  folders: DocumentFolderResource[]
+): Array<{ value: string; label: string }> {
+  const byId = new Map<string, DocumentFolderResource>(
+    folders.map((f) => [f.id, f])
+  );
+
+  const labelFor = (f: DocumentFolderResource): string => {
+    const parts: string[] = [];
+    let cur: DocumentFolderResource | undefined = f;
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      const attrs: Record<string, unknown> = cur.attributes ?? {};
+      parts.unshift(String(attrs.name ?? `folder ${cur.id}`));
+      const parentId = attrs["parent-id"] ?? attrs.parent_id;
+      cur = parentId != null ? byId.get(String(parentId)) : undefined;
+    }
+    return parts.join(" / ");
+  };
+
+  return [
+    { value: "__root__", label: "(Root — no folder)" },
+    ...folders
+      .map((f) => ({ value: String(f.id), label: labelFor(f) }))
+      .sort((a, b) => a.label.localeCompare(b.label)),
+  ];
 }
 
 // Credential extraction from gateway headers
@@ -598,8 +655,34 @@ function createMcpServer(credentialOverrides?: GatewayCredentials): Server {
         },
       },
       {
+        name: "list_document_folders",
+        description: "List document folders for an organization in IT Glue. Optionally filter by folder name (partial match). Use this to discover folder IDs for create_document.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            organization_id: {
+              type: "number",
+              description: "Organization ID to list folders for",
+            },
+            name: {
+              type: "string",
+              description: "Filter folders by name (partial match)",
+            },
+            page_size: {
+              type: "number",
+              description: "Number of results per page (max 1000, default 50)",
+            },
+            page_number: {
+              type: "number",
+              description: "Page number to retrieve (default 1)",
+            },
+          },
+          required: ["organization_id"],
+        },
+      },
+      {
         name: "create_document",
-        description: "Create a new document in IT Glue for an organization",
+        description: "Create a new document in IT Glue for an organization. If no document_folder_id is supplied, the user will be prompted to pick a folder (or 'root') interactively when the client supports elicitation. Pass skip_folder_prompt=true to suppress the prompt and create at the root.",
         inputSchema: {
           type: "object",
           properties: {
@@ -614,6 +697,14 @@ function createMcpServer(credentialOverrides?: GatewayCredentials): Server {
             content: {
               type: "string",
               description: "Document content (HTML supported)",
+            },
+            document_folder_id: {
+              type: "number",
+              description: "Optional folder ID to place the document in. Use list_document_folders to discover IDs.",
+            },
+            skip_folder_prompt: {
+              type: "boolean",
+              description: "If true, skip the interactive folder picker and create the document at the organization root.",
             },
           },
           required: ["organization_id", "name"],
@@ -1142,6 +1233,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "list_document_folders": {
+        if (!args?.organization_id) {
+          return {
+            content: [{ type: "text", text: "Error: organization_id is required" }],
+            isError: true,
+          };
+        }
+        const params: Record<string, unknown> = {};
+        const filter: Record<string, unknown> = {};
+        if (args?.name) filter.name = args.name;
+        if (Object.keys(filter).length > 0) params.filter = filter;
+        params.page = {
+          size: (args?.page_size as number) || 50,
+          number: (args?.page_number as number) || 1,
+        };
+        const result = await client.request(
+          `/organizations/${args.organization_id}/relationships/document_folders`,
+          params
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
       case "create_document": {
         if (!args?.organization_id || !args?.name) {
           return {
@@ -1149,10 +1264,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
+
+        let folderId = args.document_folder_id as number | string | undefined;
+        const skipPrompt = args.skip_folder_prompt === true;
+
+        if (folderId === undefined && !skipPrompt) {
+          const foldersResp = await client.request(
+            `/organizations/${args.organization_id}/relationships/document_folders`,
+            { page: { size: 100, number: 1 } }
+          ) as { data?: DocumentFolderResource[] };
+
+          const folders = foldersResp?.data ?? [];
+          if (folders.length > 0) {
+            const options = buildFolderPickerOptions(folders);
+            const choice = await elicitSelection(
+              `Which folder should "${args.name}" go in?`,
+              "folder",
+              options
+            );
+            if (choice && choice !== "__root__") {
+              folderId = choice;
+            }
+          }
+        }
+
         const newDoc = await createDocumentWithContent(client, {
           organization_id: args.organization_id as number | string,
           name: args.name as string,
           content: args.content as string | undefined,
+          document_folder_id: folderId,
         });
         return {
           content: [{ type: "text", text: JSON.stringify(newDoc, null, 2) }],

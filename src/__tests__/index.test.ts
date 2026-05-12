@@ -19,7 +19,11 @@ vi.stubGlobal("fetch", mockFetch);
 // Importing from ../index pulls in the production helpers. The module guards
 // its main() bootstrap on NODE_ENV=test so this import does not start an MCP
 // server during tests.
-import { createDocumentWithContent, ITGlueClient } from "../index.js";
+import {
+  buildFolderPickerOptions,
+  createDocumentWithContent,
+  ITGlueClient,
+} from "../index.js";
 
 // Store original env vars
 const originalEnv = { ...process.env };
@@ -771,6 +775,52 @@ describe("Tool Handler Integration", () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
+    it("includes document_folder_id on the POST attributes when provided", async () => {
+      mockFetch.mockResolvedValueOnce(createMockResponse({
+        data: { id: "789", type: "documents", attributes: { name: "Doc" } },
+      }));
+
+      await createDocumentWithContent(newClient(), {
+        organization_id: 1765329,
+        name: "Doc",
+        document_folder_id: 42,
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.data.attributes.document_folder_id).toBe(42);
+      expect(body.data.attributes.name).toBe("Doc");
+    });
+
+    it("accepts string folder ids and passes them through unchanged", async () => {
+      mockFetch.mockResolvedValueOnce(createMockResponse({
+        data: { id: "789", type: "documents", attributes: { name: "Doc" } },
+      }));
+
+      await createDocumentWithContent(newClient(), {
+        organization_id: 1765329,
+        name: "Doc",
+        document_folder_id: "42",
+      });
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.data.attributes.document_folder_id).toBe("42");
+    });
+
+    it("omits document_folder_id from attributes when not provided", async () => {
+      mockFetch.mockResolvedValueOnce(createMockResponse({
+        data: { id: "789", type: "documents", attributes: { name: "Doc" } },
+      }));
+
+      await createDocumentWithContent(newClient(), {
+        organization_id: 1765329,
+        name: "Doc",
+      });
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.data.attributes).not.toHaveProperty("document_folder_id");
+    });
+
     it("returns the document (not the section) as the caller-visible result", async () => {
       mockFetch
         .mockResolvedValueOnce(createMockResponse({
@@ -788,6 +838,100 @@ describe("Tool Handler Integration", () => {
 
       expect((result as { id: string; type: string }).id).toBe("23350960");
       expect((result as { id: string; type: string }).type).toBe("documents");
+    });
+  });
+
+  describe("buildFolderPickerOptions", () => {
+    it("always prepends a __root__ sentinel even when the folder list is empty", () => {
+      const options = buildFolderPickerOptions([]);
+      expect(options).toEqual([
+        { value: "__root__", label: "(Root — no folder)" },
+      ]);
+    });
+
+    it("builds breadcrumb labels for nested folders using parent-id (kebab-case)", () => {
+      const options = buildFolderPickerOptions([
+        { id: "1", attributes: { name: "Networking" } },
+        { id: "2", attributes: { name: "Firewalls", "parent-id": "1" } },
+        { id: "3", attributes: { name: "Edge", "parent-id": "2" } },
+      ]);
+      // First entry is the sentinel; the rest are sorted by label.
+      expect(options[0]).toEqual({ value: "__root__", label: "(Root — no folder)" });
+      const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
+      expect(byValue["1"]).toBe("Networking");
+      expect(byValue["2"]).toBe("Networking / Firewalls");
+      expect(byValue["3"]).toBe("Networking / Firewalls / Edge");
+    });
+
+    it("also accepts snake_case parent_id (for proxied/cached responses)", () => {
+      const options = buildFolderPickerOptions([
+        { id: "1", attributes: { name: "Top" } },
+        { id: "2", attributes: { name: "Child", parent_id: "1" } },
+      ]);
+      const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
+      expect(byValue["2"]).toBe("Top / Child");
+    });
+
+    it("disambiguates duplicate folder names under different parents", () => {
+      const options = buildFolderPickerOptions([
+        { id: "1", attributes: { name: "Networking" } },
+        { id: "2", attributes: { name: "Servers" } },
+        { id: "3", attributes: { name: "Firewalls", "parent-id": "1" } },
+        { id: "4", attributes: { name: "Firewalls", "parent-id": "2" } },
+      ]);
+      const labels = options.map((o) => o.label);
+      expect(labels).toContain("Networking / Firewalls");
+      expect(labels).toContain("Servers / Firewalls");
+    });
+
+    it("sorts folder entries alphabetically by breadcrumb label (after the sentinel)", () => {
+      const options = buildFolderPickerOptions([
+        { id: "1", attributes: { name: "Zebra" } },
+        { id: "2", attributes: { name: "Alpha" } },
+        { id: "3", attributes: { name: "Mango" } },
+      ]);
+      const folderLabels = options.slice(1).map((o) => o.label);
+      expect(folderLabels).toEqual(["Alpha", "Mango", "Zebra"]);
+    });
+
+    it("is cycle-safe — does not loop forever when parent-id points back to a descendant", () => {
+      // A → B → A (cycle). Should terminate; the resulting label is a prefix
+      // of the chain up to the repeat.
+      const options = buildFolderPickerOptions([
+        { id: "A", attributes: { name: "A", "parent-id": "B" } },
+        { id: "B", attributes: { name: "B", "parent-id": "A" } },
+      ]);
+      const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
+      // Walking from A: visit A (push "A"), parent B not seen → visit B (push "B"), parent A seen → stop.
+      expect(byValue["A"]).toBe("B / A");
+      expect(byValue["B"]).toBe("A / B");
+    });
+
+    it("treats folders with unknown parent ids as orphans (labelled by own name)", () => {
+      const options = buildFolderPickerOptions([
+        { id: "1", attributes: { name: "Stray", "parent-id": "999" } },
+      ]);
+      const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
+      expect(byValue["1"]).toBe("Stray");
+    });
+
+    it("falls back to a synthetic label when a folder has no name attribute", () => {
+      const options = buildFolderPickerOptions([
+        { id: "77", attributes: {} },
+      ]);
+      const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
+      expect(byValue["77"]).toBe("folder 77");
+    });
+
+    it("coerces numeric parent ids to strings when looking up the parent", () => {
+      // Some IT Glue responses use numeric ids; the helper should still
+      // resolve the chain.
+      const options = buildFolderPickerOptions([
+        { id: "1", attributes: { name: "Top" } },
+        { id: "2", attributes: { name: "Child", "parent-id": 1 as unknown as string } },
+      ]);
+      const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
+      expect(byValue["2"]).toBe("Top / Child");
     });
   });
 
