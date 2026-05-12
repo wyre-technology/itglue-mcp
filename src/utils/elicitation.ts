@@ -10,15 +10,26 @@ export interface ElicitOption {
 }
 
 /**
+ * Result of an `elicitSelection` call. Three states are surfaced so callers
+ * can distinguish "user said no" (typically an error) from "client cannot
+ * ask" (typically a silent fallback). Collapsing both into `null` loses
+ * meaning the caller often needs.
+ */
+export type ElicitSelectionResult =
+  | { status: "accepted"; value: string }
+  | { status: "declined" }
+  | { status: "unavailable" };
+
+/**
  * Ask the user to select from a list of options.
  */
 export async function elicitSelection(
   message: string,
   fieldName: string,
   options: ElicitOption[]
-): Promise<string | null> {
+): Promise<ElicitSelectionResult> {
   const server = getServerRef();
-  if (!server) return null;
+  if (!server) return { status: "unavailable" };
 
   try {
     const result = await server.elicitInput({
@@ -39,11 +50,11 @@ export async function elicitSelection(
     });
 
     if (result.action === "accept" && result.content) {
-      return result.content[fieldName] as string;
+      return { status: "accepted", value: result.content[fieldName] as string };
     }
-    return null;
+    return { status: "declined" };
   } catch {
-    return null;
+    return { status: "unavailable" };
   }
 }
 

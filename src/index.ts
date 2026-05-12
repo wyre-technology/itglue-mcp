@@ -291,6 +291,11 @@ export async function createDocumentWithContent(
 ): Promise<Record<string, unknown>> {
   const attributes: Record<string, unknown> = { name: args.name };
   if (args.document_folder_id !== undefined && args.document_folder_id !== null) {
+    // Verified live 2026-05-12: IT Glue accepts both snake_case
+    // `document_folder_id` and kebab-case `document-folder-id` on write
+    // (both reach the same validation path; 99999999 → 422 "must exist in
+    // the same organization"). We use snake_case to match the precedent set
+    // by `resource_type` on document-sections.
     attributes.document_folder_id = args.document_folder_id;
   }
 
@@ -322,8 +327,8 @@ export async function createDocumentWithContent(
 
 /**
  * IT Glue document folder resource shape (subset we use). Folders can be
- * nested via `parent-id`; the API serialises in kebab-case but tolerant code
- * also accepts snake_case from cached/proxied responses.
+ * nested via `parent-id` (the kebab-case key IT Glue emits); the helper also
+ * accepts `parent_id` defensively.
  */
 export interface DocumentFolderResource {
   id: string;
@@ -331,16 +336,16 @@ export interface DocumentFolderResource {
 }
 
 /**
- * Build the elicitation option list shown to users when no folder is supplied
- * to `create_document`. The first option is always a `__root__` sentinel so
- * users can explicitly choose "no folder" (distinct from cancelling). Other
- * entries are labelled with breadcrumb paths (e.g. `Networking / Firewalls`)
- * so duplicate folder names under different parents stay distinguishable, and
- * the list is sorted alphabetically by label for predictable ordering.
+ * Turn a flat list of folder resources into picker options.
  *
- * Cycle-safe: a folder whose parent chain loops back on itself stops walking
- * at the repeat. Orphan folders (parent id pointing nowhere) are labelled by
- * their own name only.
+ * The `__root__` sentinel is pinned first so picking "no folder" stays
+ * distinguishable from declining the prompt. Remaining entries are labelled
+ * with their full breadcrumb path so duplicate folder names under different
+ * parents stay distinguishable, then locale-collated by label.
+ *
+ * Cycle-safe: a folder whose parent chain loops back stops walking at the
+ * repeat. Orphan folders (parent id pointing nowhere) are labelled by their
+ * own name only.
  */
 export function buildFolderPickerOptions(
   folders: DocumentFolderResource[]
@@ -656,7 +661,7 @@ function createMcpServer(credentialOverrides?: GatewayCredentials): Server {
       },
       {
         name: "list_document_folders",
-        description: "List document folders for an organization in IT Glue. Optionally filter by folder name (partial match). Use this to discover folder IDs for create_document.",
+        description: "List document folders for an organization in IT Glue. NOTE: IT Glue requires JWT auth for this endpoint and returns 401 for API-key callers (most MCP integrations). When that happens, find the folder ID in the IT Glue web UI URL (the `folder_id` query param when viewing the folder) and pass it to create_document directly.",
         inputSchema: {
           type: "object",
           properties: {
@@ -682,7 +687,7 @@ function createMcpServer(credentialOverrides?: GatewayCredentials): Server {
       },
       {
         name: "create_document",
-        description: "Create a new document in IT Glue for an organization. If no document_folder_id is supplied, the user will be prompted to pick a folder (or 'root') interactively when the client supports elicitation. Pass skip_folder_prompt=true to suppress the prompt and create at the root.",
+        description: "Create a new document in IT Glue for an organization. If no document_folder_id is supplied AND the IT Glue token has JWT scope (rare for API-key callers — see list_document_folders), the user will be prompted to pick a folder interactively. Otherwise the document is created at the organization root. Pass skip_folder_prompt=true to always create at the root without prompting.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1269,22 +1274,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const skipPrompt = args.skip_folder_prompt === true;
 
         if (folderId === undefined && !skipPrompt) {
-          const foldersResp = await client.request(
-            `/organizations/${args.organization_id}/relationships/document_folders`,
-            { page: { size: 100, number: 1 } }
-          ) as { data?: DocumentFolderResource[] };
+          // IT Glue's /document_folders endpoint requires JWT auth (verified
+          // 2026-05-12: returns 401 "Only supported for JWT requests" for
+          // API-key callers). MCP gateway integrations use API keys, so this
+          // fetch will normally fail with 401 — degrade silently to "create
+          // at root" in that case and let the user supply document_folder_id
+          // directly if they need a folder. Other failures still propagate.
+          let folders: DocumentFolderResource[] = [];
+          try {
+            const foldersResp = await client.request(
+              `/organizations/${args.organization_id}/relationships/document_folders`,
+              { page: { size: 1000, number: 1 } }
+            ) as { data?: DocumentFolderResource[] };
+            folders = foldersResp?.data ?? [];
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (!msg.includes("401")) throw err;
+          }
 
-          const folders = foldersResp?.data ?? [];
           if (folders.length > 0) {
-            const options = buildFolderPickerOptions(folders);
-            const choice = await elicitSelection(
+            const result = await elicitSelection(
               `Which folder should "${args.name}" go in?`,
               "folder",
-              options
+              buildFolderPickerOptions(folders)
             );
-            if (choice && choice !== "__root__") {
-              folderId = choice;
+            if (result.status === "declined") {
+              return {
+                content: [{
+                  type: "text",
+                  text: "Document creation cancelled. Re-run with skip_folder_prompt=true, or supply document_folder_id explicitly.",
+                }],
+                isError: true,
+              };
             }
+            if (result.status === "accepted" && result.value !== "__root__") {
+              folderId = result.value;
+            }
+            // status === "unavailable" or value === "__root__": fall through with folderId undefined.
           }
         }
 
