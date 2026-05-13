@@ -16,7 +16,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { setServerRef } from "./utils/server-ref.js";
-import { elicitText } from "./utils/elicitation.js";
+import { elicitSelection, elicitText } from "./utils/elicitation.js";
 import { registerPromptHandlers } from "./prompts.js";
 
 // IT Glue region configuration
@@ -107,12 +107,31 @@ function buildFilterParams(filter: Record<string, unknown>): Record<string, stri
 
 // Simple IT Glue client
 export class ITGlueClient {
-  private readonly apiKey: string;
+  private readonly apiKey?: string;
+  private readonly jwt?: string;
   private readonly baseUrl: string;
 
-  constructor(config: { apiKey: string; region?: ITGlueRegion; baseUrl?: string }) {
+  constructor(config: {
+    apiKey?: string;
+    jwt?: string;
+    region?: ITGlueRegion;
+    baseUrl?: string;
+  }) {
+    if (!config.apiKey && !config.jwt) {
+      throw new Error("ITGlueClient requires either an apiKey or a jwt");
+    }
     this.apiKey = config.apiKey;
+    this.jwt = config.jwt;
     this.baseUrl = config.baseUrl || REGION_URLS[config.region || "us"];
+  }
+
+  /**
+   * Build the auth header for outbound requests. JWT (when present) wins over
+   * API key because it carries strictly broader scope on the IT Glue API.
+   */
+  private authHeaders(): Record<string, string> {
+    if (this.jwt) return { Authorization: `Bearer ${this.jwt}` };
+    return { "x-api-key": this.apiKey as string };
   }
 
   private buildQueryString(params: Record<string, unknown>): string {
@@ -148,7 +167,7 @@ export class ITGlueClient {
     const response = await fetch(url, {
       method: "GET",
       headers: {
-        "x-api-key": this.apiKey,
+        ...this.authHeaders(),
         "Content-Type": "application/vnd.api+json",
         Accept: "application/vnd.api+json",
       },
@@ -192,7 +211,7 @@ export class ITGlueClient {
     const response = await fetch(url, {
       method: "POST",
       headers: {
-        "x-api-key": this.apiKey,
+        ...this.authHeaders(),
         "Content-Type": "application/vnd.api+json",
         Accept: "application/vnd.api+json",
       },
@@ -221,7 +240,7 @@ export class ITGlueClient {
     const response = await fetch(url, {
       method: "PATCH",
       headers: {
-        "x-api-key": this.apiKey,
+        ...this.authHeaders(),
         "Content-Type": "application/vnd.api+json",
         Accept: "application/vnd.api+json",
       },
@@ -250,7 +269,7 @@ export class ITGlueClient {
     const response = await fetch(url, {
       method: "DELETE",
       headers: {
-        "x-api-key": this.apiKey,
+        ...this.authHeaders(),
         Accept: "application/vnd.api+json",
       },
     });
@@ -345,6 +364,56 @@ export type FolderReference =
   | { kind: "doc"; docId: number }
   | { kind: "invalid"; input: string };
 
+/**
+ * IT Glue document folder resource shape (subset used by the JWT-required
+ * picker path). Folders are nested via `parent-id` (kebab) on the wire; the
+ * helper also accepts `parent_id` defensively.
+ */
+export interface DocumentFolderResource {
+  id: string;
+  attributes?: Record<string, unknown>;
+}
+
+/**
+ * Turn a flat folder list into elicitation-picker options.
+ *
+ * The `__root__` sentinel is pinned first so picking "no folder" stays
+ * distinguishable from declining. Other entries are labelled with their full
+ * breadcrumb path (so duplicate folder names under different parents stay
+ * distinguishable), then locale-collated.
+ *
+ * Cycle-safe via a `seen` set; orphan folders (parent id pointing nowhere)
+ * fall back to their own name only.
+ */
+export function buildFolderPickerOptions(
+  folders: DocumentFolderResource[]
+): Array<{ value: string; label: string }> {
+  const byId = new Map<string, DocumentFolderResource>(
+    folders.map((f) => [f.id, f])
+  );
+
+  const labelFor = (f: DocumentFolderResource): string => {
+    const parts: string[] = [];
+    let cur: DocumentFolderResource | undefined = f;
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      const attrs: Record<string, unknown> = cur.attributes ?? {};
+      parts.unshift(String(attrs.name ?? `folder ${cur.id}`));
+      const parentId = attrs["parent-id"] ?? attrs.parent_id;
+      cur = parentId != null ? byId.get(String(parentId)) : undefined;
+    }
+    return parts.join(" / ");
+  };
+
+  return [
+    { value: "__root__", label: "(Root — no folder)" },
+    ...folders
+      .map((f) => ({ value: String(f.id), label: labelFor(f) }))
+      .sort((a, b) => a.label.localeCompare(b.label)),
+  ];
+}
+
 export function parseFolderReference(input: string | null | undefined): FolderReference {
   if (input == null) return { kind: "root" };
   const trimmed = input.trim();
@@ -368,6 +437,7 @@ export function parseFolderReference(input: string | null | undefined): FolderRe
 // Credential extraction from gateway headers
 interface GatewayCredentials {
   apiKey?: string;
+  jwt?: string;
   region?: ITGlueRegion;
   baseUrl?: string;
 }
@@ -375,17 +445,19 @@ interface GatewayCredentials {
 function getCredentialsFromEnv(): GatewayCredentials {
   return {
     apiKey: process.env.ITGLUE_API_KEY || process.env.X_API_KEY,
+    jwt: process.env.ITGLUE_JWT,
     region: (process.env.ITGLUE_REGION || "us") as ITGlueRegion,
     baseUrl: process.env.ITGLUE_BASE_URL,
   };
 }
 
 function createClient(credentials: GatewayCredentials): ITGlueClient {
-  if (!credentials.apiKey) {
-    throw new Error("No IT Glue API key provided");
+  if (!credentials.apiKey && !credentials.jwt) {
+    throw new Error("No IT Glue API key or JWT provided");
   }
   return new ITGlueClient({
     apiKey: credentials.apiKey,
+    jwt: credentials.jwt,
     region: credentials.region || "us",
     baseUrl: credentials.baseUrl,
   });
@@ -649,8 +721,34 @@ function createMcpServer(credentialOverrides?: GatewayCredentials): Server {
         },
       },
       {
+        name: "list_document_folders",
+        description: "List document folders for an organization in IT Glue, returning their names and IDs. Requires a JWT credential (configure via ITGLUE_JWT env var or X-ITGlue-JWT header, or paste one when prompted) — IT Glue's API key scope does not include folder enumeration.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            organization_id: {
+              type: "number",
+              description: "Organization ID to list folders for",
+            },
+            name: {
+              type: "string",
+              description: "Optional name filter (partial match)",
+            },
+            page_size: {
+              type: "number",
+              description: "Number of results per page (max 1000, default 50)",
+            },
+            page_number: {
+              type: "number",
+              description: "Page number to retrieve (default 1)",
+            },
+          },
+          required: ["organization_id"],
+        },
+      },
+      {
         name: "create_document",
-        description: "Create a new document in IT Glue for an organization. If neither document_folder_id nor skip_folder_prompt is supplied, the user is asked to paste a folder URL, a sibling-document URL, or a numeric folder ID (since IT Glue's API does not expose folder names to API-key callers). Pass skip_folder_prompt=true to always create at the organization root without prompting.",
+        description: "Create a new document in IT Glue for an organization. If neither document_folder_id nor skip_folder_prompt is supplied, the user is prompted to pick a folder. When a JWT credential is configured, the prompt is a name-based picker (preferred UX); otherwise it accepts a folder URL, a sibling-document URL, or a numeric folder ID (since folder names are not in API-key scope). Pass skip_folder_prompt=true to always create at the organization root without prompting.",
         inputSchema: {
           type: "object",
           properties: {
@@ -891,25 +989,72 @@ function createMcpServer(credentialOverrides?: GatewayCredentials): Server {
   };
 });
 
+// Session-level JWT slot. Initialised from credentials and mutated by the
+// elicitJwt path so a single paste covers the rest of the session (JWTs are
+// 2h-TTL). Per-server-instance; in stateless HTTP gateway mode each request
+// gets a fresh server, so this is effectively scoped to one request there.
+let sessionJwt: string | undefined;
+
 // Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
   const credentials = credentialOverrides ?? getCredentialsFromEnv();
 
-  if (!credentials.apiKey) {
+  // Seed the session JWT slot from credentials on first call (avoids
+  // recomputing every tool invocation).
+  if (sessionJwt === undefined && credentials.jwt) {
+    sessionJwt = credentials.jwt;
+  }
+
+  if (!credentials.apiKey && !sessionJwt) {
     return {
       content: [
         {
           type: "text",
-          text: "Error: No API credentials provided. Please configure your IT Glue API key via the ITGLUE_API_KEY or X_API_KEY environment variable.",
+          text: "Error: No API credentials provided. Please configure your IT Glue API key (ITGLUE_API_KEY env var or X-ITGlue-API-Key header) or a JWT (ITGLUE_JWT env var or X-ITGlue-JWT header).",
         },
       ],
       isError: true,
     };
   }
 
+  // Effective credentials for this call — JWT, when present, overrides
+  // because it carries strictly broader scope on the IT Glue API.
+  const effectiveCredentials: GatewayCredentials = {
+    ...credentials,
+    jwt: sessionJwt ?? credentials.jwt,
+  };
+
+  /**
+   * Ensure the session has a JWT, eliciting one from the user if needed.
+   * Returns the JWT or null if the client doesn't support elicitation /
+   * the user declined. Caches successful elicitation in `sessionJwt` so
+   * subsequent JWT-only tools don't re-prompt.
+   */
+  const ensureJwt = async (reason: string): Promise<string | null> => {
+    if (sessionJwt) return sessionJwt;
+    const elicited = await elicitText(
+      `${reason} IT Glue requires a JWT for this operation (folder names and similar resources are not in API-key scope). Paste your IT Glue JWT — find it in browser DevTools → Network → any request to itg-api-*.itglue.com → Authorization: Bearer <token>. JWT expires in ~2h; you'll be re-prompted on expiry. NOTE: this token will appear in your conversation transcript.`,
+      "jwt",
+      "IT Glue JWT (e.g. eyJ0eXAiOiJKV1Qi...)"
+    );
+    if (!elicited || elicited.trim() === "") return null;
+    sessionJwt = elicited.trim();
+    return sessionJwt;
+  };
+
+  /**
+   * Build a JWT-authenticated client for tools that need the elevated scope.
+   * Returns null when no JWT is available and elicitation didn't yield one.
+   */
+  const getJwtClient = async (reason: string): Promise<ITGlueClient | null> => {
+    const jwt = await ensureJwt(reason);
+    if (!jwt) return null;
+    return createClient({ ...effectiveCredentials, apiKey: undefined, jwt });
+  };
+
   try {
-    const client = createClient(credentials);
+    const client = createClient(effectiveCredentials);
 
     switch (name) {
       // Organizations
@@ -1201,6 +1346,55 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "list_document_folders": {
+        if (!args?.organization_id) {
+          return {
+            content: [{ type: "text", text: "Error: organization_id is required" }],
+            isError: true,
+          };
+        }
+        const jwtClient = await getJwtClient("Listing IT Glue document folders.");
+        if (!jwtClient) {
+          return {
+            content: [{
+              type: "text",
+              text: "list_document_folders requires a JWT credential. Configure ITGLUE_JWT (env) or X-ITGlue-JWT (header), or paste one when prompted. See README for how to retrieve a JWT from your browser.",
+            }],
+            isError: true,
+          };
+        }
+        const params: Record<string, unknown> = {};
+        const filter: Record<string, unknown> = {};
+        if (args?.name) filter.name = args.name;
+        if (Object.keys(filter).length > 0) params.filter = filter;
+        params.page = {
+          size: (args?.page_size as number) || 50,
+          number: (args?.page_number as number) || 1,
+        };
+        try {
+          const result = await jwtClient.request(
+            `/organizations/${args.organization_id}/relationships/document_folders`,
+            params
+          );
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg.includes("401")) {
+            sessionJwt = undefined;
+            return {
+              content: [{
+                type: "text",
+                text: "IT Glue rejected the JWT (likely expired — they last ~2h). The cached JWT has been cleared; re-run this tool to be prompted for a fresh one.",
+              }],
+              isError: true,
+            };
+          }
+          throw err;
+        }
+      }
+
       case "create_document": {
         if (!args?.organization_id || !args?.name) {
           return {
@@ -1213,55 +1407,99 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const skipPrompt = args.skip_folder_prompt === true;
 
         if (folderId === undefined && !skipPrompt) {
-          const elicited = await elicitText(
-            `Where should "${args.name}" go? Paste one of:\n  • a folder URL (e.g. https://…/documents/folder/12345/)\n  • a sibling document's URL (e.g. https://…/docs/67890)\n  • a folder ID number\nLeave blank to create at the organization root.`,
-            "folder",
-            "IT Glue folder URL, sibling-document URL, or numeric folder ID"
-          );
-          const ref = parseFolderReference(elicited);
-          if (ref.kind === "invalid") {
-            return {
-              content: [{
-                type: "text",
-                text: `Could not parse folder reference "${ref.input}". Expected a folder URL, a document URL, a numeric folder ID, or an empty value for root.`,
-              }],
-              isError: true,
-            };
-          }
-          let siblingAtRoot = false;
-          if (ref.kind === "folder") {
-            folderId = ref.folderId;
-          } else if (ref.kind === "doc") {
-            const sibling = await client.get<Record<string, unknown>>(
-              `/organizations/${args.organization_id}/relationships/documents/${ref.docId}`
-            );
-            const siblingFolder = sibling.documentFolderId ?? sibling["document-folder-id"];
-            if (siblingFolder != null) {
-              folderId = siblingFolder as number | string;
-            } else {
-              // The user pasted a sibling URL expecting placement; surface that
-              // the sibling itself is at root so "created at root" isn't a
-              // surprise.
-              siblingAtRoot = true;
+          // Prefer the name-based picker when a JWT is already configured —
+          // it's the better UX and uses the credential the caller has
+          // already opted into. Otherwise fall back to the URL/ID parser
+          // (which works with API-key auth alone).
+          const haveJwt = Boolean(sessionJwt ?? credentials.jwt);
+          let pickerUsed = false;
+
+          if (haveJwt) {
+            const jwtClient = await getJwtClient("Listing folders to pick from.");
+            if (jwtClient) {
+              try {
+                const foldersResp = await jwtClient.request(
+                  `/organizations/${args.organization_id}/relationships/document_folders`,
+                  { page: { size: 1000, number: 1 } }
+                ) as { data?: DocumentFolderResource[] };
+                const folders = foldersResp?.data ?? [];
+                if (folders.length > 0) {
+                  pickerUsed = true;
+                  const choice = await elicitSelection(
+                    `Which folder should "${args.name}" go in?`,
+                    "folder",
+                    buildFolderPickerOptions(folders)
+                  );
+                  if (choice && choice !== "__root__") {
+                    folderId = choice;
+                  }
+                  // null choice (declined/unsupported) or "__root__" → folderId stays undefined.
+                }
+              } catch (err) {
+                // 401 invalidates the cached JWT and falls through to the URL
+                // parser; any other error propagates because something is
+                // genuinely wrong.
+                const msg = err instanceof Error ? err.message : String(err);
+                if (msg.includes("401")) {
+                  sessionJwt = undefined;
+                } else {
+                  throw err;
+                }
+              }
             }
           }
-          // ref.kind === "root" (elicit blank/null/unsupported): fall through with folderId undefined.
 
-          if (siblingAtRoot) {
-            const newDoc = await createDocumentWithContent(client, {
-              organization_id: args.organization_id as number | string,
-              name: args.name as string,
-              content: args.content as string | undefined,
-              document_folder_id: folderId,
-            });
-            return {
-              content: [
-                {
+          if (!pickerUsed) {
+            const elicited = await elicitText(
+              `Where should "${args.name}" go? Paste one of:\n  • a folder URL (e.g. https://…/documents/folder/12345/)\n  • a sibling document's URL (e.g. https://…/docs/67890)\n  • a folder ID number\nLeave blank to create at the organization root.`,
+              "folder",
+              "IT Glue folder URL, sibling-document URL, or numeric folder ID"
+            );
+            const ref = parseFolderReference(elicited);
+            if (ref.kind === "invalid") {
+              return {
+                content: [{
                   type: "text",
-                  text: `Note: the sibling document you referenced lives at the organization root, so the new document was also created at the root.\n\n${JSON.stringify(newDoc, null, 2)}`,
-                },
-              ],
-            };
+                  text: `Could not parse folder reference "${ref.input}". Expected a folder URL, a document URL, a numeric folder ID, or an empty value for root.`,
+                }],
+                isError: true,
+              };
+            }
+            let siblingAtRoot = false;
+            if (ref.kind === "folder") {
+              folderId = ref.folderId;
+            } else if (ref.kind === "doc") {
+              const sibling = await client.get<Record<string, unknown>>(
+                `/organizations/${args.organization_id}/relationships/documents/${ref.docId}`
+              );
+              const siblingFolder = sibling.documentFolderId ?? sibling["document-folder-id"];
+              if (siblingFolder != null) {
+                folderId = siblingFolder as number | string;
+              } else {
+                // The user pasted a sibling URL expecting placement; surface
+                // that the sibling itself is at root so "created at root"
+                // isn't a surprise.
+                siblingAtRoot = true;
+              }
+            }
+            // ref.kind === "root" (elicit blank/null/unsupported): fall through with folderId undefined.
+
+            if (siblingAtRoot) {
+              const newDoc = await createDocumentWithContent(client, {
+                organization_id: args.organization_id as number | string,
+                name: args.name as string,
+                content: args.content as string | undefined,
+                document_folder_id: folderId,
+              });
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `Note: the sibling document you referenced lives at the organization root, so the new document was also created at the root.\n\n${JSON.stringify(newDoc, null, 2)}`,
+                  },
+                ],
+              };
+            }
           }
         }
 
@@ -1567,14 +1805,15 @@ async function startHttpTransport(): Promise<void> {
         const apiKey =
           (headers["x-itglue-api-key"] as string) ||
           (headers["x-api-key"] as string);
+        const jwt = (headers["x-itglue-jwt"] as string) || undefined;
 
-        if (!apiKey) {
+        if (!apiKey && !jwt) {
           res.writeHead(401, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
               error: "Missing credentials",
-              message: "Gateway mode requires X-ITGlue-API-Key header",
-              required: ["X-ITGlue-API-Key"],
+              message: "Gateway mode requires X-ITGlue-API-Key or X-ITGlue-JWT header",
+              required: ["X-ITGlue-API-Key OR X-ITGlue-JWT"],
             })
           );
           return;
@@ -1585,6 +1824,7 @@ async function startHttpTransport(): Promise<void> {
 
         gatewayCredentials = {
           apiKey,
+          jwt,
           region: (region || "us") as ITGlueRegion,
           baseUrl: baseUrl || undefined,
         };
