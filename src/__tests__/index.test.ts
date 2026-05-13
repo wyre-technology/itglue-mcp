@@ -20,6 +20,7 @@ vi.stubGlobal("fetch", mockFetch);
 // its main() bootstrap on NODE_ENV=test so this import does not start an MCP
 // server during tests.
 import {
+  buildFolderPickerOptions,
   createDocumentWithContent,
   ITGlueClient,
   parseFolderReference,
@@ -838,6 +839,137 @@ describe("Tool Handler Integration", () => {
 
       expect((result as { id: string; type: string }).id).toBe("23350960");
       expect((result as { id: string; type: string }).type).toBe("documents");
+    });
+  });
+
+  describe("ITGlueClient auth dispatch", () => {
+    it("throws when neither apiKey nor jwt is provided", () => {
+      expect(() => new ITGlueClient({ region: "us" } as never)).toThrow(
+        /apiKey or a jwt/i
+      );
+    });
+
+    it("sends Authorization: Bearer when a JWT is configured", async () => {
+      let captured: Record<string, string> = {};
+      mockFetch.mockImplementation((_url: string, options: RequestInit) => {
+        captured = options.headers as Record<string, string>;
+        return createMockResponse(createJsonApiResponse([]));
+      });
+
+      const client = new ITGlueClient({ jwt: "test-jwt", region: "us" });
+      await client.request("/organizations", {});
+
+      expect(captured["Authorization"]).toBe("Bearer test-jwt");
+      expect(captured["x-api-key"]).toBeUndefined();
+    });
+
+    it("sends x-api-key when only an apiKey is configured", async () => {
+      let captured: Record<string, string> = {};
+      mockFetch.mockImplementation((_url: string, options: RequestInit) => {
+        captured = options.headers as Record<string, string>;
+        return createMockResponse(createJsonApiResponse([]));
+      });
+
+      const client = new ITGlueClient({ apiKey: "test-key", region: "us" });
+      await client.request("/organizations", {});
+
+      expect(captured["x-api-key"]).toBe("test-key");
+      expect(captured["Authorization"]).toBeUndefined();
+    });
+
+    it("prefers JWT over apiKey when both are configured (JWT carries broader scope)", async () => {
+      let captured: Record<string, string> = {};
+      mockFetch.mockImplementation((_url: string, options: RequestInit) => {
+        captured = options.headers as Record<string, string>;
+        return createMockResponse(createJsonApiResponse([]));
+      });
+
+      const client = new ITGlueClient({
+        apiKey: "test-key",
+        jwt: "test-jwt",
+        region: "us",
+      });
+      await client.request("/organizations", {});
+
+      expect(captured["Authorization"]).toBe("Bearer test-jwt");
+      expect(captured["x-api-key"]).toBeUndefined();
+    });
+
+    it("uses JWT auth on POST as well as GET", async () => {
+      let captured: Record<string, string> = {};
+      mockFetch.mockImplementation((_url: string, options: RequestInit) => {
+        captured = options.headers as Record<string, string>;
+        return createMockResponse({
+          data: { id: "1", type: "documents", attributes: { name: "d" } },
+        });
+      });
+
+      const client = new ITGlueClient({ jwt: "test-jwt", region: "us" });
+      await client.post("/organizations/1/relationships/documents", {
+        data: { type: "documents", attributes: { name: "d" } },
+      });
+
+      expect(captured["Authorization"]).toBe("Bearer test-jwt");
+    });
+  });
+
+  describe("buildFolderPickerOptions", () => {
+    it("always prepends a __root__ sentinel even when the folder list is empty", () => {
+      const options = buildFolderPickerOptions([]);
+      expect(options).toEqual([
+        { value: "__root__", label: "(Root — no folder)" },
+      ]);
+    });
+
+    it("builds breadcrumb labels for nested folders using parent-id (kebab-case)", () => {
+      const options = buildFolderPickerOptions([
+        { id: "1", attributes: { name: "Networking" } },
+        { id: "2", attributes: { name: "Firewalls", "parent-id": "1" } },
+        { id: "3", attributes: { name: "Edge", "parent-id": "2" } },
+      ]);
+      expect(options[0]).toEqual({ value: "__root__", label: "(Root — no folder)" });
+      const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
+      expect(byValue["1"]).toBe("Networking");
+      expect(byValue["2"]).toBe("Networking / Firewalls");
+      expect(byValue["3"]).toBe("Networking / Firewalls / Edge");
+    });
+
+    it("also accepts snake_case parent_id", () => {
+      const options = buildFolderPickerOptions([
+        { id: "1", attributes: { name: "Top" } },
+        { id: "2", attributes: { name: "Child", parent_id: "1" } },
+      ]);
+      const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
+      expect(byValue["2"]).toBe("Top / Child");
+    });
+
+    it("disambiguates duplicate folder names under different parents", () => {
+      const options = buildFolderPickerOptions([
+        { id: "1", attributes: { name: "Networking" } },
+        { id: "2", attributes: { name: "Servers" } },
+        { id: "3", attributes: { name: "Firewalls", "parent-id": "1" } },
+        { id: "4", attributes: { name: "Firewalls", "parent-id": "2" } },
+      ]);
+      const labels = options.map((o) => o.label);
+      expect(labels).toContain("Networking / Firewalls");
+      expect(labels).toContain("Servers / Firewalls");
+    });
+
+    it("is cycle-safe (parent chain looping back terminates)", () => {
+      const options = buildFolderPickerOptions([
+        { id: "A", attributes: { name: "A", "parent-id": "B" } },
+        { id: "B", attributes: { name: "B", "parent-id": "A" } },
+      ]);
+      const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
+      expect(byValue["A"]).toBe("B / A");
+      expect(byValue["B"]).toBe("A / B");
+    });
+
+    it("treats unknown parent ids as orphans (own-name label)", () => {
+      const options = buildFolderPickerOptions([
+        { id: "1", attributes: { name: "Stray", "parent-id": "999" } },
+      ]);
+      expect(options.find((o) => o.value === "1")?.label).toBe("Stray");
     });
   });
 
