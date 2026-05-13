@@ -650,7 +650,7 @@ function createMcpServer(credentialOverrides?: GatewayCredentials): Server {
       },
       {
         name: "create_document",
-        description: "Create a new document in IT Glue for an organization. If neither document_folder_id nor skip_folder_prompt is supplied and the client supports elicitation, the user is asked to paste a folder URL, a sibling-document URL, or a numeric folder ID (since IT Glue's API does not expose folder names to API-key callers). Pass skip_folder_prompt=true to always create at the organization root without prompting.",
+        description: "Create a new document in IT Glue for an organization. If neither document_folder_id nor skip_folder_prompt is supplied, the user is asked to paste a folder URL, a sibling-document URL, or a numeric folder ID (since IT Glue's API does not expose folder names to API-key callers). Pass skip_folder_prompt=true to always create at the organization root without prompting.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1214,7 +1214,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         if (folderId === undefined && !skipPrompt) {
           const elicited = await elicitText(
-            `Which folder should "${args.name}" go in? Paste a folder URL (https://…/documents/folder/12345/), a sibling-document URL (https://…/docs/67890), or a numeric folder ID. Leave blank to create at the organization root.`,
+            `Where should "${args.name}" go? Paste one of:\n  • a folder URL (e.g. https://…/documents/folder/12345/)\n  • a sibling document's URL (e.g. https://…/docs/67890)\n  • a folder ID number\nLeave blank to create at the organization root.`,
             "folder",
             "IT Glue folder URL, sibling-document URL, or numeric folder ID"
           );
@@ -1228,6 +1228,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               isError: true,
             };
           }
+          let siblingAtRoot = false;
           if (ref.kind === "folder") {
             folderId = ref.folderId;
           } else if (ref.kind === "doc") {
@@ -1237,10 +1238,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const siblingFolder = sibling.documentFolderId ?? sibling["document-folder-id"];
             if (siblingFolder != null) {
               folderId = siblingFolder as number | string;
+            } else {
+              // The user pasted a sibling URL expecting placement; surface that
+              // the sibling itself is at root so "created at root" isn't a
+              // surprise.
+              siblingAtRoot = true;
             }
-            // If the sibling lives at the root, fall through with folderId undefined.
           }
           // ref.kind === "root" (elicit blank/null/unsupported): fall through with folderId undefined.
+
+          if (siblingAtRoot) {
+            const newDoc = await createDocumentWithContent(client, {
+              organization_id: args.organization_id as number | string,
+              name: args.name as string,
+              content: args.content as string | undefined,
+              document_folder_id: folderId,
+            });
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Note: the sibling document you referenced lives at the organization root, so the new document was also created at the root.\n\n${JSON.stringify(newDoc, null, 2)}`,
+                },
+              ],
+            };
+          }
         }
 
         const newDoc = await createDocumentWithContent(client, {
