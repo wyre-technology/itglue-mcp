@@ -16,7 +16,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { setServerRef } from "./utils/server-ref.js";
-import { elicitText, elicitSelection } from "./utils/elicitation.js";
+import { elicitText } from "./utils/elicitation.js";
 import { registerPromptHandlers } from "./prompts.js";
 
 // IT Glue region configuration
@@ -326,54 +326,43 @@ export async function createDocumentWithContent(
 }
 
 /**
- * IT Glue document folder resource shape (subset we use). Folders can be
- * nested via `parent-id` (the kebab-case key IT Glue emits); the helper also
- * accepts `parent_id` defensively.
- */
-export interface DocumentFolderResource {
-  id: string;
-  attributes?: Record<string, unknown>;
-}
-
-/**
- * Turn a flat list of folder resources into picker options.
+ * Parse a folder reference supplied by the user. Folder *names* are not
+ * reachable with API-key auth (IT Glue gates `/document_folders` behind a
+ * user-session JWT — see the README for the JWT escape hatch). So the
+ * elicitation path accepts inputs the user can copy out of their browser
+ * tab while looking at the folder they want:
  *
- * The `__root__` sentinel is pinned first so picking "no folder" stays
- * distinguishable from declining the prompt. Remaining entries are labelled
- * with their full breadcrumb path so duplicate folder names under different
- * parents stay distinguishable, then locale-collated by label.
- *
- * Cycle-safe: a folder whose parent chain loops back stops walking at the
- * repeat. Orphan folders (parent id pointing nowhere) are labelled by their
- * own name only.
+ *   - empty / whitespace → root
+ *   - bare numeric id    → folder
+ *   - URL containing `/documents/folder/<id>/` → folder
+ *   - URL containing `/docs/<id>` or `/DOC-<org>-<id>` → doc (caller GETs
+ *     the doc and reads its `document-folder-id` to resolve the folder)
+ *   - anything else      → invalid
  */
-export function buildFolderPickerOptions(
-  folders: DocumentFolderResource[]
-): Array<{ value: string; label: string }> {
-  const byId = new Map<string, DocumentFolderResource>(
-    folders.map((f) => [f.id, f])
-  );
+export type FolderReference =
+  | { kind: "root" }
+  | { kind: "folder"; folderId: number }
+  | { kind: "doc"; docId: number }
+  | { kind: "invalid"; input: string };
 
-  const labelFor = (f: DocumentFolderResource): string => {
-    const parts: string[] = [];
-    let cur: DocumentFolderResource | undefined = f;
-    const seen = new Set<string>();
-    while (cur && !seen.has(cur.id)) {
-      seen.add(cur.id);
-      const attrs: Record<string, unknown> = cur.attributes ?? {};
-      parts.unshift(String(attrs.name ?? `folder ${cur.id}`));
-      const parentId = attrs["parent-id"] ?? attrs.parent_id;
-      cur = parentId != null ? byId.get(String(parentId)) : undefined;
-    }
-    return parts.join(" / ");
-  };
+export function parseFolderReference(input: string | null | undefined): FolderReference {
+  if (input == null) return { kind: "root" };
+  const trimmed = input.trim();
+  if (trimmed === "") return { kind: "root" };
 
-  return [
-    { value: "__root__", label: "(Root — no folder)" },
-    ...folders
-      .map((f) => ({ value: String(f.id), label: labelFor(f) }))
-      .sort((a, b) => a.label.localeCompare(b.label)),
-  ];
+  if (/^\d+$/.test(trimmed)) {
+    return { kind: "folder", folderId: Number(trimmed) };
+  }
+
+  const folderMatch = trimmed.match(/\/documents\/folder\/(\d+)/);
+  if (folderMatch) return { kind: "folder", folderId: Number(folderMatch[1]) };
+
+  const docMatch =
+    trimmed.match(/\/docs\/(\d+)/) ??
+    trimmed.match(/\/DOC-\d+-(\d+)/i);
+  if (docMatch) return { kind: "doc", docId: Number(docMatch[1]) };
+
+  return { kind: "invalid", input: trimmed };
 }
 
 // Credential extraction from gateway headers
@@ -660,34 +649,8 @@ function createMcpServer(credentialOverrides?: GatewayCredentials): Server {
         },
       },
       {
-        name: "list_document_folders",
-        description: "List document folders for an organization in IT Glue. NOTE: IT Glue requires JWT auth for this endpoint and returns 401 for API-key callers (most MCP integrations). When that happens, find the folder ID in the IT Glue web UI URL (the `folder_id` query param when viewing the folder) and pass it to create_document directly.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            organization_id: {
-              type: "number",
-              description: "Organization ID to list folders for",
-            },
-            name: {
-              type: "string",
-              description: "Filter folders by name (partial match)",
-            },
-            page_size: {
-              type: "number",
-              description: "Number of results per page (max 1000, default 50)",
-            },
-            page_number: {
-              type: "number",
-              description: "Page number to retrieve (default 1)",
-            },
-          },
-          required: ["organization_id"],
-        },
-      },
-      {
         name: "create_document",
-        description: "Create a new document in IT Glue for an organization. If no document_folder_id is supplied AND the IT Glue token has JWT scope (rare for API-key callers — see list_document_folders), the user will be prompted to pick a folder interactively. Otherwise the document is created at the organization root. Pass skip_folder_prompt=true to always create at the root without prompting.",
+        description: "Create a new document in IT Glue for an organization. If neither document_folder_id nor skip_folder_prompt is supplied and the client supports elicitation, the user is asked to paste a folder URL, a sibling-document URL, or a numeric folder ID (since IT Glue's API does not expose folder names to API-key callers). Pass skip_folder_prompt=true to always create at the organization root without prompting.",
         inputSchema: {
           type: "object",
           properties: {
@@ -705,7 +668,7 @@ function createMcpServer(credentialOverrides?: GatewayCredentials): Server {
             },
             document_folder_id: {
               type: "number",
-              description: "Optional folder ID to place the document in. Use list_document_folders to discover IDs.",
+              description: "Optional folder ID to place the document in. Find folder IDs in the IT Glue web URL (e.g. `/documents/folder/12345/`) or by inspecting `document-folder-id` on an existing document in that folder.",
             },
             skip_folder_prompt: {
               type: "boolean",
@@ -1238,30 +1201,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case "list_document_folders": {
-        if (!args?.organization_id) {
-          return {
-            content: [{ type: "text", text: "Error: organization_id is required" }],
-            isError: true,
-          };
-        }
-        const params: Record<string, unknown> = {};
-        const filter: Record<string, unknown> = {};
-        if (args?.name) filter.name = args.name;
-        if (Object.keys(filter).length > 0) params.filter = filter;
-        params.page = {
-          size: (args?.page_size as number) || 50,
-          number: (args?.page_number as number) || 1,
-        };
-        const result = await client.request(
-          `/organizations/${args.organization_id}/relationships/document_folders`,
-          params
-        );
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
-      }
-
       case "create_document": {
         if (!args?.organization_id || !args?.name) {
           return {
@@ -1274,44 +1213,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const skipPrompt = args.skip_folder_prompt === true;
 
         if (folderId === undefined && !skipPrompt) {
-          // IT Glue's /document_folders endpoint requires JWT auth (verified
-          // 2026-05-12: returns 401 "Only supported for JWT requests" for
-          // API-key callers). MCP gateway integrations use API keys, so this
-          // fetch will normally fail with 401 — degrade silently to "create
-          // at root" in that case and let the user supply document_folder_id
-          // directly if they need a folder. Other failures still propagate.
-          let folders: DocumentFolderResource[] = [];
-          try {
-            const foldersResp = await client.request(
-              `/organizations/${args.organization_id}/relationships/document_folders`,
-              { page: { size: 1000, number: 1 } }
-            ) as { data?: DocumentFolderResource[] };
-            folders = foldersResp?.data ?? [];
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            if (!msg.includes("401")) throw err;
+          const elicited = await elicitText(
+            `Which folder should "${args.name}" go in? Paste a folder URL (https://…/documents/folder/12345/), a sibling-document URL (https://…/docs/67890), or a numeric folder ID. Leave blank to create at the organization root.`,
+            "folder",
+            "IT Glue folder URL, sibling-document URL, or numeric folder ID"
+          );
+          const ref = parseFolderReference(elicited);
+          if (ref.kind === "invalid") {
+            return {
+              content: [{
+                type: "text",
+                text: `Could not parse folder reference "${ref.input}". Expected a folder URL, a document URL, a numeric folder ID, or an empty value for root.`,
+              }],
+              isError: true,
+            };
           }
-
-          if (folders.length > 0) {
-            const result = await elicitSelection(
-              `Which folder should "${args.name}" go in?`,
-              "folder",
-              buildFolderPickerOptions(folders)
+          if (ref.kind === "folder") {
+            folderId = ref.folderId;
+          } else if (ref.kind === "doc") {
+            const sibling = await client.get<Record<string, unknown>>(
+              `/organizations/${args.organization_id}/relationships/documents/${ref.docId}`
             );
-            if (result.status === "declined") {
-              return {
-                content: [{
-                  type: "text",
-                  text: "Document creation cancelled. Re-run with skip_folder_prompt=true, or supply document_folder_id explicitly.",
-                }],
-                isError: true,
-              };
+            const siblingFolder = sibling.documentFolderId ?? sibling["document-folder-id"];
+            if (siblingFolder != null) {
+              folderId = siblingFolder as number | string;
             }
-            if (result.status === "accepted" && result.value !== "__root__") {
-              folderId = result.value;
-            }
-            // status === "unavailable" or value === "__root__": fall through with folderId undefined.
+            // If the sibling lives at the root, fall through with folderId undefined.
           }
+          // ref.kind === "root" (elicit blank/null/unsupported): fall through with folderId undefined.
         }
 
         const newDoc = await createDocumentWithContent(client, {

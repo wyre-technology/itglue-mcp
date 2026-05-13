@@ -20,9 +20,9 @@ vi.stubGlobal("fetch", mockFetch);
 // its main() bootstrap on NODE_ENV=test so this import does not start an MCP
 // server during tests.
 import {
-  buildFolderPickerOptions,
   createDocumentWithContent,
   ITGlueClient,
+  parseFolderReference,
 } from "../index.js";
 
 // Store original env vars
@@ -841,97 +841,54 @@ describe("Tool Handler Integration", () => {
     });
   });
 
-  describe("buildFolderPickerOptions", () => {
-    it("always prepends a __root__ sentinel even when the folder list is empty", () => {
-      const options = buildFolderPickerOptions([]);
-      expect(options).toEqual([
-        { value: "__root__", label: "(Root — no folder)" },
-      ]);
+  describe("parseFolderReference", () => {
+    it("returns root for null, undefined, empty, and whitespace input", () => {
+      expect(parseFolderReference(null)).toEqual({ kind: "root" });
+      expect(parseFolderReference(undefined)).toEqual({ kind: "root" });
+      expect(parseFolderReference("")).toEqual({ kind: "root" });
+      expect(parseFolderReference("   \n  ")).toEqual({ kind: "root" });
     });
 
-    it("builds breadcrumb labels for nested folders using parent-id (kebab-case)", () => {
-      const options = buildFolderPickerOptions([
-        { id: "1", attributes: { name: "Networking" } },
-        { id: "2", attributes: { name: "Firewalls", "parent-id": "1" } },
-        { id: "3", attributes: { name: "Edge", "parent-id": "2" } },
-      ]);
-      // First entry is the sentinel; the rest are sorted by label.
-      expect(options[0]).toEqual({ value: "__root__", label: "(Root — no folder)" });
-      const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
-      expect(byValue["1"]).toBe("Networking");
-      expect(byValue["2"]).toBe("Networking / Firewalls");
-      expect(byValue["3"]).toBe("Networking / Firewalls / Edge");
+    it("returns a folder reference for a bare numeric id (trimmed)", () => {
+      expect(parseFolderReference("6926612")).toEqual({ kind: "folder", folderId: 6926612 });
+      expect(parseFolderReference("  6926612  ")).toEqual({ kind: "folder", folderId: 6926612 });
     });
 
-    it("also accepts snake_case parent_id (for proxied/cached responses)", () => {
-      const options = buildFolderPickerOptions([
-        { id: "1", attributes: { name: "Top" } },
-        { id: "2", attributes: { name: "Child", parent_id: "1" } },
-      ]);
-      const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
-      expect(byValue["2"]).toBe("Top / Child");
+    it("extracts the folder id from an IT Glue folder URL", () => {
+      const url = "https://wyretechnology.itglue.com/8250506/documents/folder/6926612/";
+      expect(parseFolderReference(url)).toEqual({ kind: "folder", folderId: 6926612 });
     });
 
-    it("disambiguates duplicate folder names under different parents", () => {
-      const options = buildFolderPickerOptions([
-        { id: "1", attributes: { name: "Networking" } },
-        { id: "2", attributes: { name: "Servers" } },
-        { id: "3", attributes: { name: "Firewalls", "parent-id": "1" } },
-        { id: "4", attributes: { name: "Firewalls", "parent-id": "2" } },
-      ]);
-      const labels = options.map((o) => o.label);
-      expect(labels).toContain("Networking / Firewalls");
-      expect(labels).toContain("Servers / Firewalls");
+    it("handles a folder URL with no trailing slash", () => {
+      const url = "https://wyretechnology.itglue.com/8250506/documents/folder/6926612";
+      expect(parseFolderReference(url)).toEqual({ kind: "folder", folderId: 6926612 });
     });
 
-    it("sorts folder entries alphabetically by breadcrumb label (after the sentinel)", () => {
-      const options = buildFolderPickerOptions([
-        { id: "1", attributes: { name: "Zebra" } },
-        { id: "2", attributes: { name: "Alpha" } },
-        { id: "3", attributes: { name: "Mango" } },
-      ]);
-      const folderLabels = options.slice(1).map((o) => o.label);
-      expect(folderLabels).toEqual(["Alpha", "Mango", "Zebra"]);
+    it("extracts the doc id from a `/docs/<id>` URL (resource-url shape)", () => {
+      const url = "https://wyretechnology.itglue.com/8250506/docs/22884804";
+      expect(parseFolderReference(url)).toEqual({ kind: "doc", docId: 22884804 });
     });
 
-    it("is cycle-safe — does not loop forever when parent-id points back to a descendant", () => {
-      // A → B → A (cycle). Should terminate; the resulting label is a prefix
-      // of the chain up to the repeat.
-      const options = buildFolderPickerOptions([
-        { id: "A", attributes: { name: "A", "parent-id": "B" } },
-        { id: "B", attributes: { name: "B", "parent-id": "A" } },
-      ]);
-      const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
-      // Walking from A: visit A (push "A"), parent B not seen → visit B (push "B"), parent A seen → stop.
-      expect(byValue["A"]).toBe("B / A");
-      expect(byValue["B"]).toBe("A / B");
+    it("extracts the doc id from a `DOC-<org>-<id>` URL (UI shape)", () => {
+      const url = "https://wyretechnology.itglue.com/DOC-8250506-22884804";
+      expect(parseFolderReference(url)).toEqual({ kind: "doc", docId: 22884804 });
     });
 
-    it("treats folders with unknown parent ids as orphans (labelled by own name)", () => {
-      const options = buildFolderPickerOptions([
-        { id: "1", attributes: { name: "Stray", "parent-id": "999" } },
-      ]);
-      const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
-      expect(byValue["1"]).toBe("Stray");
+    it("prefers the more specific folder pattern when both could match", () => {
+      // A folder URL is unambiguous — the doc pattern should not steal from it.
+      const url = "https://x/8250506/documents/folder/6926612/";
+      expect(parseFolderReference(url)).toEqual({ kind: "folder", folderId: 6926612 });
     });
 
-    it("falls back to a synthetic label when a folder has no name attribute", () => {
-      const options = buildFolderPickerOptions([
-        { id: "77", attributes: {} },
-      ]);
-      const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
-      expect(byValue["77"]).toBe("folder 77");
-    });
-
-    it("coerces numeric parent ids to strings when looking up the parent", () => {
-      // Some IT Glue responses use numeric ids; the helper should still
-      // resolve the chain.
-      const options = buildFolderPickerOptions([
-        { id: "1", attributes: { name: "Top" } },
-        { id: "2", attributes: { name: "Child", "parent-id": 1 as unknown as string } },
-      ]);
-      const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
-      expect(byValue["2"]).toBe("Top / Child");
+    it("flags unparseable input as invalid (preserves the original for the error message)", () => {
+      expect(parseFolderReference("not a url or id")).toEqual({
+        kind: "invalid",
+        input: "not a url or id",
+      });
+      expect(parseFolderReference("https://example.com/somewhere/else")).toEqual({
+        kind: "invalid",
+        input: "https://example.com/somewhere/else",
+      });
     });
   });
 
