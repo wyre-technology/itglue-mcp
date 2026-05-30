@@ -122,7 +122,26 @@ export class ITGlueClient {
     }
     this.apiKey = config.apiKey;
     this.jwt = config.jwt;
-    this.baseUrl = config.baseUrl || REGION_URLS[config.region || "us"];
+
+    if (config.baseUrl) {
+      this.baseUrl = config.baseUrl;
+    } else {
+      const region = config.region || "us";
+      // REGION_URLS is keyed by ITGlueRegion, but callers reach this via an
+      // `as ITGlueRegion` cast on ITGLUE_REGION / X-ITGlue-Region, so the value
+      // can be any string at runtime. Validate explicitly: an unknown region
+      // used to yield baseUrl=undefined and a "Failed to parse URL from
+      // undefined/..." error downstream (issue #40).
+      const regionUrl = (REGION_URLS as Record<string, string>)[region];
+      if (!regionUrl) {
+        throw new Error(
+          `Invalid IT Glue region "${region}". Valid regions are: ${Object.keys(REGION_URLS).join(", ")}. ` +
+            `ITGLUE_REGION is the IT Glue API region, not your account subdomain. ` +
+            `To target a custom API endpoint, set ITGLUE_BASE_URL instead.`
+        );
+      }
+      this.baseUrl = regionUrl;
+    }
   }
 
   /**

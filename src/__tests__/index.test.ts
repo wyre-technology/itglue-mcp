@@ -179,6 +179,39 @@ describe("ITGlueClient", () => {
       process.env.ITGLUE_REGION = "au";
       expect(process.env.ITGLUE_REGION).toBe("au");
     });
+
+    it("should resolve the US base URL for region 'us'", async () => {
+      mockFetch.mockImplementation(() => createMockResponse(createJsonApiResponse([])));
+      const client = new ITGlueClient({ apiKey: "test-api-key", region: "us" });
+      await client.request("/organizations");
+      expect(mockFetch.mock.calls[0][0]).toMatch(/^https:\/\/api\.itglue\.com\/organizations/);
+    });
+
+    it("should resolve the EU base URL for region 'eu'", async () => {
+      mockFetch.mockImplementation(() => createMockResponse(createJsonApiResponse([])));
+      const client = new ITGlueClient({ apiKey: "test-api-key", region: "eu" });
+      await client.request("/organizations");
+      expect(mockFetch.mock.calls[0][0]).toMatch(/^https:\/\/api\.eu\.itglue\.com\/organizations/);
+    });
+
+    it("should throw a clear error for an unknown region instead of producing an 'undefined' URL", () => {
+      // Reproduces issue #40: ITGLUE_REGION set to an account subdomain (not us/eu/au)
+      // previously yielded baseUrl=undefined and a "Failed to parse URL from undefined/..." error.
+      expect(
+        () => new ITGlueClient({ apiKey: "test-api-key", region: "our-itg-subdomain" as never })
+      ).toThrowError(/Invalid.*region/i);
+    });
+
+    it("should still honor an explicit baseUrl even when region is unknown", async () => {
+      mockFetch.mockImplementation(() => createMockResponse(createJsonApiResponse([])));
+      const client = new ITGlueClient({
+        apiKey: "test-api-key",
+        region: "our-itg-subdomain" as never,
+        baseUrl: "https://api.itglue.example",
+      });
+      await client.request("/organizations");
+      expect(mockFetch.mock.calls[0][0]).toMatch(/^https:\/\/api\.itglue\.example\/organizations/);
+    });
   });
 
   describe("API Request Building", () => {
