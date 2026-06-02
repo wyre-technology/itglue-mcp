@@ -1,3 +1,21 @@
+## [Unreleased]
+
+### Fixed
+
+- **GitHub Packages auth:** `.npmrc` now reads a `read:packages` token from
+  `NODE_AUTH_TOKEN`, and the README install instructions document the required
+  `export NODE_AUTH_TOKEN=$(gh auth token)` step so consumers can install the
+  published `@wyre-technology/itglue-mcp` package (and any `@wyre-technology/*`
+  packages) without a 401 from `npm.pkg.github.com`. Note: unlike the other Wyre
+  MCP servers, this one has no private runtime SDK dependency, so the one-click
+  deploy buttons were never affected by the build-time 401.
+
+### Changed
+
+- **Publishing:** releases now publish `@wyre-technology/itglue-mcp` to the GitHub
+  Packages npm registry (`npmPublish: true`; `publishConfig.registry` was already
+  set to `https://npm.pkg.github.com`).
+
 ## [1.5.3](https://github.com/wyre-technology/itglue-mcp/compare/v1.5.2...v1.5.3) (2026-04-07)
 
 

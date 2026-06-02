@@ -8,11 +8,32 @@ A Model Context Protocol (MCP) server that provides Claude with access to IT Glu
 
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/wyre-technology/itglue-mcp)
 
+> [!NOTE]
+> Unlike the other Wyre MCP servers, this one talks to the IT Glue API directly and
+> has **no private `@wyre-technology/*` runtime dependency**, so the one-click build
+> does not need a GitHub Packages token — the cloud builder's `npm ci` only pulls
+> public packages. (A `read:packages` token is only needed to install the published
+> `@wyre-technology/itglue-mcp` package itself; see [Installation](#installation).)
+> The DigitalOcean target builds the full Docker image and runs the complete MCP
+> server over HTTP and is the recommended path; this repo does not ship a Workers
+> entrypoint (`src/worker.ts`), so prefer DigitalOcean or the prebuilt container
+> image (`ghcr.io/wyre-technology/itglue-mcp`).
+
 ## Installation
 
+This package is published to the **GitHub Packages** npm registry, which requires a
+token even for public packages. Authenticate npm once, then install:
+
 ```bash
+# Authenticate npm to GitHub Packages (token needs the read:packages scope)
+export NODE_AUTH_TOKEN=$(gh auth token)   # or a PAT with read:packages
+
 npm install @wyre-technology/itglue-mcp
 ```
+
+The repo's `.npmrc` already points the `@wyre-technology` scope at GitHub Packages and
+reads the token from `NODE_AUTH_TOKEN`, so no further config is needed. The same applies
+to `npx @wyre-technology/itglue-mcp`.
 
 Or use the Docker image:
 
