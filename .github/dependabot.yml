@@ -5,12 +5,6 @@ updates:
     schedule:
       interval: "daily"
     open-pull-requests-limit: 10
-    ignore:
-      # TypeScript 6.0 drops Node/web globals (process, fetch, Response, URL)
-      # unless tsconfig lib/types are reworked. Revisit as a deliberate
-      # migration; stay on the latest 5.x in the meantime.
-      - dependency-name: "typescript"
-        update-types: ["version-update:semver-major"]
     groups:
       # Bundle all non-major npm updates into a single PR to cut noise.
       npm-minor-patch:
