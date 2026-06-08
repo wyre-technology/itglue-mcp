@@ -27,6 +27,7 @@ LICENSE
 jest.config.js
 vitest.config.ts
 .eslintrc.*
+eslint.config.js
 .prettierrc.*
 docker-compose.yml
 wrangler.json
