@@ -36,21 +36,39 @@ export function decodeJwtExpMs(jwt: string): number | null {
   }
 }
 
-/** Selectors for the IT Glue login form. Overridable via env so the flow can be
- * tuned against the live page without a code change — the DOM is the part most
- * likely to drift, and this is a spike. */
+/**
+ * Selectors for the KaseyaOne SSO login that IT Glue federates to.
+ *
+ * IT Glue does NOT present a native login form: `https://<account>.itglue.com/login`
+ * 302s to `https://one.kaseya.com/connect/authorize` (OIDC), which logs in over
+ * three steps and form_posts an auth code back to `<account>.itglue.com/oidc/user/session`.
+ * The IT Glue SPA then loads and issues the user-session JWT we capture.
+ *
+ * Steps 1 (username + organization) and 2 (password) were verified live against
+ * the real KaseyaOne page. Step 3 (MFA/OTP) was NOT — login was not completed —
+ * so the `totp`/`totpSubmit` selectors are best-effort. Every selector is
+ * overridable via env so the flow can be tuned without a code change.
+ */
 export interface LoginSelectors {
-  email: string;
+  username: string;
+  organizationName: string;
+  next: string;
   password: string;
-  submit: string;
+  login: string;
   totp: string;
+  totpSubmit: string;
 }
 
 export const DEFAULT_LOGIN_SELECTORS: LoginSelectors = {
-  email: 'input[type="email"], input[name="email"], #user_email',
-  password: 'input[type="password"], input[name="password"], #user_password',
-  submit: 'button[type="submit"], input[type="submit"]',
-  totp: 'input[name="otp_attempt"], input[autocomplete="one-time-code"], input[name="code"]',
+  // Verified against the live KaseyaOne login page (steps 1–2):
+  username: '#username, input[name="username"]',
+  organizationName: '#organizationName, input[name="organizationName"]',
+  next: 'button:has-text("Next")',
+  password: '#password, input[name="password"]',
+  login: 'button:has-text("Log In")',
+  // Best-effort — the MFA step was not reachable without completing login:
+  totp: 'input[autocomplete="one-time-code"], input[name="code"], input[name="otp"], input[inputmode="numeric"]',
+  totpSubmit: 'button:has-text("Verify"), button:has-text("Log In"), button[type="submit"]',
 };
 
 export interface BrowserAcquireOptions {
@@ -58,6 +76,9 @@ export interface BrowserAcquireOptions {
   email: string;
   password: string;
   totpSecret: string;
+  /** KaseyaOne "organization" for step 1. Required by the live form unless the
+   * tenant is pre-selected; supplied via ITG_LOGIN_ORG. */
+  organizationName?: string;
   /** Host fragment the JWT-bearing API requests hit. IT Glue's SPA calls
    * `itg-api-*.itglue.com`; we capture the Authorization header off those. */
   apiHostMatch?: string;
@@ -98,13 +119,14 @@ interface PwChromium {
 }
 
 /**
- * Drive a headless browser through the IT Glue login and capture the
- * `Authorization: Bearer <jwt>` header the SPA attaches to its API calls.
+ * Drive a headless browser through the KaseyaOne SSO login that IT Glue
+ * federates to, then capture the `Authorization: Bearer <jwt>` header the IT
+ * Glue SPA attaches to its API calls once the session is established.
  *
- * The DOM steps are best-effort and selector-driven (see DEFAULT_LOGIN_SELECTORS)
- * because they could not be validated against the live login page in this spike.
- * The token-capture strategy — sniffing the outbound Authorization header rather
- * than scraping localStorage — is the robust part and is independent of layout.
+ * Flow (see LoginSelectors for which steps are verified): username + org → Next,
+ * password → Log In, MFA code → submit. The token-capture strategy — sniffing
+ * the outbound Authorization header to the API host rather than scraping
+ * localStorage — is the robust part and is independent of the login layout.
  */
 export async function acquireJwtViaBrowser(
   opts: BrowserAcquireOptions
@@ -152,26 +174,28 @@ export async function acquireJwtViaBrowser(
       });
     });
 
+    // Following the IT Glue → KaseyaOne OIDC redirect lands on the username step.
     await page.goto(opts.loginUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
 
-    await page.fill(selectors.email, opts.email);
-    // IT Glue may use a one-step or two-step (email-then-password) form. Fill
-    // the password if it's present now; otherwise advance and fill it next.
-    if (await page.locator(selectors.password).count()) {
-      await page.fill(selectors.password, opts.password);
-    } else {
-      await page.click(selectors.submit);
-      await page.waitForSelector(selectors.password, { timeout: timeoutMs });
-      await page.fill(selectors.password, opts.password);
+    // Step 1: username (+ organization), then Next.
+    await page.waitForSelector(selectors.username, { timeout: timeoutMs });
+    await page.fill(selectors.username, opts.email);
+    if (opts.organizationName && (await page.locator(selectors.organizationName).count())) {
+      await page.fill(selectors.organizationName, opts.organizationName);
     }
-    await page.click(selectors.submit);
+    await page.click(selectors.next);
 
-    // Answer the OTP challenge if one appears.
+    // Step 2: password, then Log In.
+    await page.waitForSelector(selectors.password, { timeout: timeoutMs });
+    await page.fill(selectors.password, opts.password);
+    await page.click(selectors.login);
+
+    // Step 3: answer the MFA/OTP challenge if one appears (selectors unverified).
     const totpField = page.locator(selectors.totp);
     try {
-      await totpField.waitFor({ state: "visible", timeout: 10_000 });
+      await totpField.waitFor({ state: "visible", timeout: 15_000 });
       await totpField.fill(generateTotp(opts.totpSecret));
-      await page.click(selectors.submit);
+      await page.click(selectors.totpSubmit);
     } catch {
       // No OTP step surfaced — either MFA is off or the layout differs. The
       // JWT may still be issued; fall through to the capture promise.

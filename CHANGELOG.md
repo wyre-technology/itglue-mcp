@@ -12,6 +12,11 @@
   nor `playwright-core`. Carries significant security weight (the env vars can
   bypass the account's MFA) — see the README security warning. New helpers:
   `src/utils/totp.ts` (RFC 6238) and `src/utils/jwt-acquisition.ts` (`JwtManager`).
+  Login was confirmed to federate through **KaseyaOne SSO** (`one.kaseya.com`
+  OIDC, steps: username + org → password → MFA), not a native IT Glue form;
+  the prototype's selectors were validated live through the password step
+  (`ITG_LOGIN_ORG` added for the organization field). The MFA step and full
+  end-to-end login remain unverified.
 
 ### Fixed
 

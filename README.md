@@ -89,17 +89,20 @@ Provide the JWT in whichever way matches your deployment:
 
 > **Status: experimental prototype (issue [#55](https://github.com/wyre-technology/itglue-mcp/issues/55)).** Not enabled by default and not recommended for general use yet. The login flow drives the live IT Glue web UI, which can change without notice. Test it against your own account before relying on it.
 
-The 2-hour JWT expiry makes folder navigation impractical on headless Docker deployments — someone has to harvest a fresh token from a browser every couple of hours. As an opt-in alternative, the container can log into IT Glue itself with a real (headless) browser, capture the user-session JWT, and keep it refreshed ahead of expiry. Set all three of these and the server takes over `ITGLUE_JWT` for you:
+The 2-hour JWT expiry makes folder navigation impractical on headless Docker deployments — someone has to harvest a fresh token from a browser every couple of hours. As an opt-in alternative, the container can log in itself with a real (headless) browser, capture the user-session JWT, and keep it refreshed ahead of expiry. Set the credentials below and the server takes over `ITGLUE_JWT` for you:
 
 | Variable | Description |
 |----------|-------------|
-| `ITG_EMAIL` | IT Glue login email for the service account. |
+| `ITG_EMAIL` | Login email (username) for the service account. |
 | `ITG_PASSWORD` | That account's password. |
 | `ITG_TOTP_SECRET` | The account's MFA seed (the base32 secret you would scan into an authenticator app), used to compute the OTP at login. |
-| `ITG_LOGIN_URL` | Your account login URL, e.g. `https://<your-account>.itglue.com/login`. Required when the three above are set. |
+| `ITG_LOGIN_URL` | Your account login URL, e.g. `https://<your-account>.itglue.com/login`. Required when the credentials above are set. |
+| `ITG_LOGIN_ORG` | Your KaseyaOne organization name (the "organization" field on the login form). Usually required. |
 | `ITG_BROWSER_PATH` | Optional path to a Chromium binary if not using Playwright's bundled one. |
 
 When all of `ITG_EMAIL`, `ITG_PASSWORD`, and `ITG_TOTP_SECRET` are present (env mode only), the server logs in on startup, writes the captured JWT into `ITGLUE_JWT`, and refreshes it ~5 minutes before each expiry. If login fails, the server still starts and serves all API-key-only tools — only folder enumeration is affected. Gateway mode (per-request header credentials) is unaffected by these variables.
+
+> **Login goes through KaseyaOne SSO.** IT Glue does not present a native login form — `https://<account>.itglue.com/login` redirects to KaseyaOne (`one.kaseya.com`, OIDC) and logs in over three steps: **username + organization → password → MFA**. The flow this prototype drives was verified live through the password step; the **MFA/OTP step was not completed end-to-end**, so its selectors are best-effort and may need tuning against your tenant. If your account uses a non-TOTP second factor (e.g. a push/device approval) rather than an authenticator code, automated login will not work at all.
 
 This requires the optional `playwright-core` dependency **and** a Chromium binary in the image (neither is in the default build):
 

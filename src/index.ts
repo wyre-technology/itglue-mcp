@@ -208,7 +208,13 @@ export function maybeStartJwtAutoAcquisition(): JwtManager | null {
 
   const manager = new JwtManager({
     acquire: () =>
-      acquireJwtViaBrowser({ loginUrl, email, password, totpSecret }),
+      acquireJwtViaBrowser({
+        loginUrl,
+        email,
+        password,
+        totpSecret,
+        organizationName: process.env.ITG_LOGIN_ORG,
+      }),
     onJwt: (jwt) => {
       process.env.ITGLUE_JWT = jwt;
     },
