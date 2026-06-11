@@ -55,6 +55,7 @@ The server accepts credentials via environment variables:
 | `MCP_HTTP_PORT` | Port for HTTP transport (default: `8080`) | No |
 | `MCP_HTTP_HOST` | Bind address for HTTP transport (default: `0.0.0.0`) | No |
 | `AUTH_MODE` | `env` (read credentials from environment) or `gateway` (read per-request credentials from HTTP headers). Default: `env`. | No |
+| `ITG_EMAIL` / `ITG_PASSWORD` / `ITG_TOTP_SECRET` / `ITG_LOGIN_URL` | **Experimental.** Opt-in headless JWT auto-acquisition for folder navigation. See [Automatic JWT acquisition](#automatic-jwt-acquisition-experimental-headless-deployments) — read the security warning first. | No |
 
 Alternative: When `AUTH_MODE=gateway`, the MCP Gateway injects credentials per request via HTTP headers instead of environment variables. See [Remote Deployment](#remote-deployment-http-streamable).
 
@@ -83,6 +84,43 @@ Provide the JWT in whichever way matches your deployment:
 4. Copy the value of the `Authorization: Bearer <token>` request header — the `<token>` part is your JWT.
 
 > **Expiry:** IT Glue JWTs are short-lived (~2 hours). A JWT placed in `ITGLUE_JWT` on a long-running container will go stale and folder enumeration will start failing until it is refreshed. Interactive clients are simply re-prompted on expiry. API-key-only operations (everything except folder enumeration) are unaffected.
+
+### Automatic JWT acquisition (experimental, headless deployments)
+
+> **Status: experimental prototype (issue [#55](https://github.com/wyre-technology/itglue-mcp/issues/55)).** Not enabled by default and not recommended for general use yet. The login flow drives the live IT Glue web UI, which can change without notice. Test it against your own account before relying on it.
+
+The 2-hour JWT expiry makes folder navigation impractical on headless Docker deployments — someone has to harvest a fresh token from a browser every couple of hours. As an opt-in alternative, the container can log into IT Glue itself with a real (headless) browser, capture the user-session JWT, and keep it refreshed ahead of expiry. Set all three of these and the server takes over `ITGLUE_JWT` for you:
+
+| Variable | Description |
+|----------|-------------|
+| `ITG_EMAIL` | IT Glue login email for the service account. |
+| `ITG_PASSWORD` | That account's password. |
+| `ITG_TOTP_SECRET` | The account's MFA seed (the base32 secret you would scan into an authenticator app), used to compute the OTP at login. |
+| `ITG_LOGIN_URL` | Your account login URL, e.g. `https://<your-account>.itglue.com/login`. Required when the three above are set. |
+| `ITG_BROWSER_PATH` | Optional path to a Chromium binary if not using Playwright's bundled one. |
+
+When all of `ITG_EMAIL`, `ITG_PASSWORD`, and `ITG_TOTP_SECRET` are present (env mode only), the server logs in on startup, writes the captured JWT into `ITGLUE_JWT`, and refreshes it ~5 minutes before each expiry. If login fails, the server still starts and serves all API-key-only tools — only folder enumeration is affected. Gateway mode (per-request header credentials) is unaffected by these variables.
+
+This requires the optional `playwright-core` dependency **and** a Chromium binary in the image (neither is in the default build):
+
+```dockerfile
+# In a derived image, on top of the published itglue-mcp image:
+USER root
+RUN apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont
+RUN npm install playwright-core
+ENV ITG_BROWSER_PATH=/usr/bin/chromium-browser
+USER mcp
+```
+
+> ### ⚠️ Security warning — read before enabling
+>
+> These variables together hold **everything needed to authenticate as a human user, including bypassing that user's MFA** (the TOTP seed is the second factor). This is a materially larger blast radius than an API key. Treat it accordingly:
+>
+> - **Use a dedicated, least-privilege IT Glue service account** — never a human admin's credentials. Scope it to exactly the access folder enumeration needs.
+> - **Store these as secrets**, never in an image layer, `docker-compose.yml`, or source control. Inject them at runtime (e.g. Docker/K8s secrets).
+> - The server **never logs the credentials or the JWT**, but anyone with shell access to the container can read them from the environment. Restrict access.
+> - **Rotate** the password and TOTP seed if the host is ever compromised, and prefer short credential lifetimes where your IT Glue plan allows.
+> - This bypasses IT Glue's intended API-key boundary by automating their web UI. Confirm it is acceptable under your IT Glue agreement and your own security policy before using it.
 
 ## Available Tools
 

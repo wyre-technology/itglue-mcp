@@ -19,6 +19,7 @@ import {
   type GatewayCredentials,
   type ITGlueRegion,
 } from "./mcp-server.js";
+import { JwtManager, acquireJwtViaBrowser } from "./utils/jwt-acquisition.js";
 
 // Re-export the shared factory + IT Glue client/helpers so existing consumers
 // (and tests) that import from the package entry keep working after the
@@ -173,9 +174,58 @@ async function startHttpTransport(): Promise<void> {
   process.on("SIGTERM", shutdown);
 }
 
+/**
+ * Opt-in JWT auto-acquisition (issue #55, SPIKE).
+ *
+ * When ITG_EMAIL, ITG_PASSWORD, and ITG_TOTP_SECRET are all set, the container
+ * logs into IT Glue via a headless browser, captures the user-session JWT, and
+ * keeps `process.env.ITGLUE_JWT` refreshed ahead of its ~2h expiry. The existing
+ * credential path reads `ITGLUE_JWT` live on every call, so no request-path
+ * changes are needed — and the folder-list error handler already re-reads it on
+ * a 401, so mid-session expiry self-heals on the next attempt.
+ *
+ * Disabled unless all three vars are present. Gateway mode (per-request header
+ * credentials) is unaffected. Returns the manager so callers can stop it.
+ *
+ * SECURITY: these vars together can bypass the account's MFA. Use a dedicated,
+ * least-privilege IT Glue service account, never a human admin's credentials.
+ */
+export function maybeStartJwtAutoAcquisition(): JwtManager | null {
+  const email = process.env.ITG_EMAIL;
+  const password = process.env.ITG_PASSWORD;
+  const totpSecret = process.env.ITG_TOTP_SECRET;
+  if (!email || !password || !totpSecret) return null;
+
+  const loginUrl = process.env.ITG_LOGIN_URL;
+  if (!loginUrl) {
+    console.error(
+      "JWT auto-acquisition: ITG_EMAIL/ITG_PASSWORD/ITG_TOTP_SECRET are set but " +
+        "ITG_LOGIN_URL is missing. Set it to your IT Glue account login URL " +
+        "(e.g. https://<your-account>.itglue.com/login). Skipping auto-acquisition."
+    );
+    return null;
+  }
+
+  const manager = new JwtManager({
+    acquire: () =>
+      acquireJwtViaBrowser({ loginUrl, email, password, totpSecret }),
+    onJwt: (jwt) => {
+      process.env.ITGLUE_JWT = jwt;
+    },
+    logger: (msg) => console.error(`[jwt-auto] ${msg}`),
+  });
+
+  // Fire-and-forget the initial acquisition: a slow/failed login must not block
+  // the MCP server from serving API-key-only tools.
+  void manager.start();
+  return manager;
+}
+
 // Start the server
 async function main() {
   const transportType = process.env.MCP_TRANSPORT || "stdio";
+
+  maybeStartJwtAutoAcquisition();
 
   if (transportType === "http") {
     await startHttpTransport();

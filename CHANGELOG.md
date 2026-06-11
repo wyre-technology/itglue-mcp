@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+### Added
+
+- **Experimental headless JWT auto-acquisition (issue #55, prototype — not yet
+  shipped):** when `ITG_EMAIL`, `ITG_PASSWORD`, and `ITG_TOTP_SECRET` are set
+  (env mode), the container can log into IT Glue via a headless browser
+  (`playwright-core`, an optional dependency), capture the user-session JWT, and
+  keep `ITGLUE_JWT` refreshed ahead of its ~2h expiry — removing the manual
+  token-refresh toil that makes folder navigation impractical on Docker
+  deployments. Strictly opt-in; the default image bundles neither the browser
+  nor `playwright-core`. Carries significant security weight (the env vars can
+  bypass the account's MFA) — see the README security warning. New helpers:
+  `src/utils/totp.ts` (RFC 6238) and `src/utils/jwt-acquisition.ts` (`JwtManager`).
+
 ### Fixed
 
 - **GitHub Packages auth:** `.npmrc` now reads a `read:packages` token from
