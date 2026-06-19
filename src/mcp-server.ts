@@ -626,6 +626,193 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
           required: ["id"],
         },
       },
+      // Locations
+      {
+        name: "search_locations",
+        description:
+          "Search for locations (physical addresses/sites) of an organization in IT Glue. " +
+          "Each result includes the address fields and phone number. Locations are a built-in " +
+          "IT Glue entity (not a flexible asset), so use this rather than search_flexible_assets " +
+          "to look up an organization's address or phone.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            organization_id: {
+              type: "number",
+              description: "Filter by organization ID (recommended — locations are scoped to organizations)",
+            },
+            name: {
+              type: "string",
+              description: "Filter by location name (partial match)",
+            },
+            city: {
+              type: "string",
+              description: "Filter by city",
+            },
+            region_id: {
+              type: "number",
+              description: "Filter by region/state ID",
+            },
+            country_id: {
+              type: "number",
+              description: "Filter by country ID",
+            },
+            psa_id: {
+              type: "string",
+              description: "Filter by PSA integration ID",
+            },
+            page_size: {
+              type: "number",
+              description: "Number of results per page (max 1000, default 50)",
+            },
+            page_number: {
+              type: "number",
+              description: "Page number to retrieve (default 1)",
+            },
+            sort: {
+              type: "string",
+              description: "Sort field (prefix with - for descending, e.g., '-name')",
+            },
+          },
+          required: [],
+        },
+      },
+      {
+        name: "get_location",
+        description: "Get a specific location by ID from IT Glue, including its full address and phone number.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: {
+              type: "string",
+              description: "The location ID",
+            },
+          },
+          required: ["id"],
+        },
+      },
+      {
+        name: "create_location",
+        description:
+          "Create a new location (physical address/site) for an organization in IT Glue. " +
+          "IT Glue requires a name and typically a country_id for a location.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            organization_id: {
+              type: "number",
+              description: "Organization ID to create the location in",
+            },
+            name: {
+              type: "string",
+              description: "Location name/title",
+            },
+            country_id: {
+              type: "number",
+              description: "Country ID — IT Glue typically requires this when creating a location. Find country IDs in the IT Glue web UI.",
+            },
+            region_id: {
+              type: "number",
+              description: "Region/state ID",
+            },
+            address_1: {
+              type: "string",
+              description: "Address line 1",
+            },
+            address_2: {
+              type: "string",
+              description: "Address line 2",
+            },
+            city: {
+              type: "string",
+              description: "City",
+            },
+            postal_code: {
+              type: "string",
+              description: "Postal/ZIP code",
+            },
+            phone: {
+              type: "string",
+              description: "Phone number",
+            },
+            fax: {
+              type: "string",
+              description: "Fax number",
+            },
+            notes: {
+              type: "string",
+              description: "Free-text notes",
+            },
+            primary: {
+              type: "boolean",
+              description: "Whether this is the organization's primary location",
+            },
+          },
+          required: ["organization_id", "name"],
+        },
+      },
+      {
+        name: "update_location",
+        description: "Update an existing location in IT Glue. Only the fields you supply are changed.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            organization_id: {
+              type: "number",
+              description: "Organization ID that owns the location",
+            },
+            id: {
+              type: "string",
+              description: "The location ID to update",
+            },
+            name: {
+              type: "string",
+              description: "Location name/title",
+            },
+            country_id: {
+              type: "number",
+              description: "Country ID",
+            },
+            region_id: {
+              type: "number",
+              description: "Region/state ID",
+            },
+            address_1: {
+              type: "string",
+              description: "Address line 1",
+            },
+            address_2: {
+              type: "string",
+              description: "Address line 2",
+            },
+            city: {
+              type: "string",
+              description: "City",
+            },
+            postal_code: {
+              type: "string",
+              description: "Postal/ZIP code",
+            },
+            phone: {
+              type: "string",
+              description: "Phone number",
+            },
+            fax: {
+              type: "string",
+              description: "Fax number",
+            },
+            notes: {
+              type: "string",
+              description: "Free-text notes",
+            },
+            primary: {
+              type: "boolean",
+              description: "Whether this is the organization's primary location",
+            },
+          },
+          required: ["organization_id", "id"],
+        },
+      },
       // Passwords
       {
         name: "search_passwords",
@@ -1214,6 +1401,146 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               text: JSON.stringify(config, null, 2),
             },
           ],
+        };
+      }
+
+      // Locations
+      case "search_locations": {
+        const params: Record<string, unknown> = {};
+        const filter: Record<string, unknown> = {};
+
+        let locOrgId = args?.organization_id as number | undefined;
+
+        // If no organization_id, elicit an organization name search to find it
+        // (mirrors search_configurations / search_passwords).
+        if (!locOrgId) {
+          const orgSearch = await elicitText(
+            "Locations are easier to find when scoped to an organization. Which organization?",
+            "organization",
+            "Enter an organization name to search for"
+          );
+          if (orgSearch) {
+            const orgResult = await client.request("/organizations", {
+              filter: { name: orgSearch },
+              page: { size: 5, number: 1 },
+            });
+            const orgs = orgResult.data as Array<Record<string, unknown>>;
+            if (orgs.length === 1) {
+              locOrgId = Number(orgs[0].id);
+            } else if (orgs.length > 1) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `Multiple organizations match "${orgSearch}". Please re-run with a specific organization_id:\n\n${JSON.stringify(orgs.map((o) => ({ id: o.id, name: o.name })), null, 2)}`,
+                  },
+                ],
+              };
+            }
+          }
+        }
+
+        if (locOrgId) filter.organizationId = locOrgId;
+        if (args?.name) filter.name = args.name;
+        if (args?.city) filter.city = args.city;
+        if (args?.region_id) filter.regionId = args.region_id;
+        if (args?.country_id) filter.countryId = args.country_id;
+        if (args?.psa_id) filter.psaId = args.psa_id;
+
+        if (Object.keys(filter).length > 0) params.filter = filter;
+        if (args?.sort) params.sort = args.sort;
+        params.page = {
+          size: (args?.page_size as number) || 50,
+          number: (args?.page_number as number) || 1,
+        };
+
+        const result = await client.request("/locations", params);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "get_location": {
+        if (!args?.id) {
+          return {
+            content: [{ type: "text", text: "Error: Location ID is required" }],
+            isError: true,
+          };
+        }
+        const location = await client.get(`/locations/${args.id}`);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(location, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "create_location": {
+        if (!args?.organization_id || !args?.name) {
+          return {
+            content: [{ type: "text", text: "Error: organization_id and name are required" }],
+            isError: true,
+          };
+        }
+        // IT Glue accepts snake_case attribute keys on write (same precedent as
+        // document creation). The organization is supplied via the relationship
+        // path, so it is not repeated in attributes.
+        const argv = args as Record<string, unknown>;
+        const attributes: Record<string, unknown> = { name: argv.name };
+        const writableFields = [
+          "country_id", "region_id", "address_1", "address_2",
+          "city", "postal_code", "phone", "fax", "notes", "primary",
+        ];
+        for (const field of writableFields) {
+          const value = argv[field];
+          if (value !== undefined && value !== null) attributes[field] = value;
+        }
+        const newLocation = await client.post(
+          `/organizations/${args.organization_id}/relationships/locations`,
+          { data: { type: "locations", attributes } }
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(newLocation, null, 2) }],
+        };
+      }
+
+      case "update_location": {
+        if (!args?.organization_id || !args?.id) {
+          return {
+            content: [{ type: "text", text: "Error: organization_id and id are required" }],
+            isError: true,
+          };
+        }
+        const argv = args as Record<string, unknown>;
+        const attributes: Record<string, unknown> = {};
+        const writableFields = [
+          "name", "country_id", "region_id", "address_1", "address_2",
+          "city", "postal_code", "phone", "fax", "notes", "primary",
+        ];
+        for (const field of writableFields) {
+          const value = argv[field];
+          if (value !== undefined && value !== null) attributes[field] = value;
+        }
+        if (Object.keys(attributes).length === 0) {
+          return {
+            content: [{ type: "text", text: "Error: provide at least one field to update (e.g. phone, address_1, city)" }],
+            isError: true,
+          };
+        }
+        const updatedLocation = await client.patch(
+          `/organizations/${args.organization_id}/relationships/locations/${args.id}`,
+          { data: { type: "locations", attributes } }
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(updatedLocation, null, 2) }],
         };
       }
 

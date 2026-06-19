@@ -96,6 +96,13 @@ Provide the JWT in whichever way matches your deployment:
 - **search_configurations** - Search for configurations with filtering by organization, name, type, status, serial number, RMM ID, or PSA ID
 - **get_configuration** - Get a specific configuration by ID
 
+### Locations (Addresses/Sites)
+
+- **search_locations** - Search an organization's locations (built-in address/site records), filtering by organization, name, city, region, or country. Results include the address fields and phone number.
+- **get_location** - Get a specific location by ID, including its full address and phone number
+- **create_location** - Create a new location for an organization (requires `name`, typically `country_id`)
+- **update_location** - Update an existing location; only the fields you supply are changed
+
 ### Passwords
 
 - **search_passwords** - Search for password entries (metadata only, no actual passwords in results)

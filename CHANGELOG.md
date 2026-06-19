@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- **Locations tools:** `search_locations`, `get_location`, `create_location`, and
+  `update_location` for IT Glue's built-in Locations entity (physical
+  addresses/sites). Locations carry an organization's address fields and phone
+  number, which previously could not be retrieved through the server — the only
+  paths were `get_organization` (no address/phone) and `search_flexible_assets`
+  (custom assets only). `search_locations` mirrors `search_configurations`
+  (org-scoped, with the same "search by org name" elicitation fallback) and
+  filters by name, city, region, or country; the write tools accept the full
+  address/phone field set. API-key scope is sufficient — no JWT required.
+
 ### Fixed
 
 - **GitHub Packages auth:** `.npmrc` now reads a `read:packages` token from

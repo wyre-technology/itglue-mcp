@@ -22,9 +22,12 @@ vi.stubGlobal("fetch", mockFetch);
 import {
   buildFolderPickerOptions,
   createDocumentWithContent,
+  createMcpServer,
   ITGlueClient,
   parseFolderReference,
 } from "../index.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 // Store original env vars
 const originalEnv = { ...process.env };
@@ -326,10 +329,15 @@ describe("Tool Definitions", () => {
     { name: "get_organization", requiredFields: ["id"], properties: ["id"] },
     { name: "search_configurations", requiredFields: [] as string[], properties: ["organization_id", "name", "configuration_type_id", "configuration_status_id", "serial_number", "rmm_id", "psa_id", "page_size", "page_number", "sort"] },
     { name: "get_configuration", requiredFields: ["id"], properties: ["id"] },
+    { name: "search_locations", requiredFields: [] as string[], properties: ["organization_id", "name", "city", "region_id", "country_id", "psa_id", "page_size", "page_number", "sort"] },
+    { name: "get_location", requiredFields: ["id"], properties: ["id"] },
+    { name: "create_location", requiredFields: ["organization_id", "name"], properties: ["organization_id", "name", "country_id", "region_id", "address_1", "address_2", "city", "postal_code", "phone", "fax", "notes", "primary"] },
+    { name: "update_location", requiredFields: ["organization_id", "id"], properties: ["organization_id", "id", "name", "country_id", "region_id", "address_1", "address_2", "city", "postal_code", "phone", "fax", "notes", "primary"] },
     { name: "search_passwords", requiredFields: [] as string[], properties: ["organization_id", "name", "password_category_id", "url", "username", "page_size", "page_number", "sort"] },
     { name: "get_password", requiredFields: ["id"], properties: ["id", "show_password"] },
     { name: "search_documents", requiredFields: ["organization_id"] as string[], properties: ["organization_id", "name", "page_size", "page_number", "sort"] },
     { name: "get_document", requiredFields: ["organization_id", "id"], properties: ["organization_id", "id"] },
+    { name: "list_document_folders", requiredFields: ["organization_id"], properties: ["organization_id", "name", "page_size", "page_number"] },
     { name: "create_document", requiredFields: ["organization_id", "name"], properties: ["organization_id", "name", "content"] },
     { name: "list_document_sections", requiredFields: ["document_id"], properties: ["document_id"] },
     { name: "create_document_section", requiredFields: ["document_id", "section_type", "content"], properties: ["document_id", "section_type", "content"] },
@@ -354,8 +362,8 @@ describe("Tool Definitions", () => {
     });
   });
 
-  it("should have 19 tools total", () => {
-    expect(tools.length).toBe(19);
+  it("should have 24 tools total", () => {
+    expect(tools.length).toBe(24);
   });
 });
 
@@ -1827,5 +1835,209 @@ describe("Health Check Response Format", () => {
     expect(parsed.status).toBe("ok");
     expect(parsed.region).toBe("us");
     expect(parsed.organizationTypesFound).toBe(5);
+  });
+});
+
+// Exercises the REAL MCP server end-to-end (ListTools + CallTool) over an
+// in-memory transport pair, so these tests cover the actual tool-handler
+// dispatch — not a re-implemented mock. fetch stays mocked underneath.
+describe("Locations tools (round-trip)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function connectLocationsClient(): Promise<Client> {
+    const server = createMcpServer({ apiKey: "test-api-key" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "locations-test", version: "1.0.0" });
+    await client.connect(clientTransport);
+    return client;
+  }
+
+  function firstText(result: unknown): string {
+    const r = result as { content?: Array<{ text?: string }> };
+    return r.content?.[0]?.text ?? "";
+  }
+
+  function isError(result: unknown): boolean {
+    return (result as { isError?: boolean }).isError === true;
+  }
+
+  it("registers all four locations tools", async () => {
+    const client = await connectLocationsClient();
+    const { tools } = await client.listTools();
+    const names = tools.map((t) => t.name);
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "search_locations",
+        "get_location",
+        "create_location",
+        "update_location",
+      ])
+    );
+  });
+
+  it("exposes 24 tools total", async () => {
+    const client = await connectLocationsClient();
+    const { tools } = await client.listTools();
+    expect(tools.length).toBe(24);
+  });
+
+  it("search_locations queries /locations filtered by organization and city", async () => {
+    const client = await connectLocationsClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(
+        createJsonApiResponse([
+          {
+            id: "5",
+            type: "locations",
+            attributes: {
+              name: "Primary Address",
+              phone: "423-555-0100",
+              city: "Chattanooga",
+              primary: true,
+            },
+          },
+        ])
+      )
+    );
+
+    const result = await client.callTool({
+      name: "search_locations",
+      arguments: { organization_id: 8637099, city: "Chattanooga" },
+    });
+
+    // Decode first: buildQueryString uses URLSearchParams, which percent-encodes
+    // the JSON:API filter brackets (filter%5Borganization-id%5D=...).
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).toContain("/locations?");
+    expect(url).toContain("filter[organization-id]=8637099");
+    expect(url).toContain("filter[city]=Chattanooga");
+    expect(firstText(result)).toContain("423-555-0100");
+  });
+
+  it("get_location fetches a single location by id", async () => {
+    const client = await connectLocationsClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse({
+        data: {
+          id: "5",
+          type: "locations",
+          attributes: { name: "HQ", phone: "423-555-0100" },
+        },
+      })
+    );
+
+    const result = await client.callTool({
+      name: "get_location",
+      arguments: { id: 5 },
+    });
+
+    expect(mockFetch.mock.calls[0][0]).toBe(
+      "https://api.itglue.com/locations/5"
+    );
+    expect(firstText(result)).toContain("423-555-0100");
+  });
+
+  it("get_location returns an error when id is missing", async () => {
+    const client = await connectLocationsClient();
+    const result = await client.callTool({
+      name: "get_location",
+      arguments: {},
+    });
+    expect(isError(result)).toBe(true);
+    expect(firstText(result).toLowerCase()).toContain("id is required");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("create_location posts attributes to the org locations relationship", async () => {
+    const client = await connectLocationsClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse({
+        data: {
+          id: "5",
+          type: "locations",
+          attributes: { name: "HQ", phone: "423-555-0100" },
+        },
+        meta: {},
+      })
+    );
+
+    const result = await client.callTool({
+      name: "create_location",
+      arguments: {
+        organization_id: 123,
+        name: "HQ",
+        phone: "423-555-0100",
+        country_id: 1,
+      },
+    });
+
+    const [url, options] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      "https://api.itglue.com/organizations/123/relationships/locations"
+    );
+    expect(options.method).toBe("POST");
+    expect(JSON.parse(options.body as string)).toEqual({
+      data: {
+        type: "locations",
+        attributes: { name: "HQ", phone: "423-555-0100", country_id: 1 },
+      },
+    });
+    expect(firstText(result)).toContain("HQ");
+  });
+
+  it("create_location requires organization_id and name", async () => {
+    const client = await connectLocationsClient();
+    const result = await client.callTool({
+      name: "create_location",
+      arguments: { name: "HQ" },
+    });
+    expect(isError(result)).toBe(true);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("update_location patches only the supplied fields", async () => {
+    const client = await connectLocationsClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse({
+        data: {
+          id: "5",
+          type: "locations",
+          attributes: { phone: "423-555-9999" },
+        },
+        meta: {},
+      })
+    );
+
+    const result = await client.callTool({
+      name: "update_location",
+      arguments: { organization_id: 123, id: 5, phone: "423-555-9999" },
+    });
+
+    const [url, options] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      "https://api.itglue.com/organizations/123/relationships/locations/5"
+    );
+    expect(options.method).toBe("PATCH");
+    expect(JSON.parse(options.body as string)).toEqual({
+      data: {
+        type: "locations",
+        attributes: { phone: "423-555-9999" },
+      },
+    });
+    expect(firstText(result)).toContain("423-555-9999");
+  });
+
+  it("update_location requires at least one field to change", async () => {
+    const client = await connectLocationsClient();
+    const result = await client.callTool({
+      name: "update_location",
+      arguments: { organization_id: 123, id: 5 },
+    });
+    expect(isError(result)).toBe(true);
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });
