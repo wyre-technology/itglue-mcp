@@ -24,6 +24,7 @@ import {
   createDocumentWithContent,
   ITGlueClient,
   parseFolderReference,
+  rootLevelDocumentsNote,
 } from "../index.js";
 
 // Store original env vars
@@ -730,6 +731,34 @@ describe("Tool Handler Integration", () => {
       const json = (await response.json()) as JsonApiResponse;
 
       expect((json.data as JsonApiResource[])[0].attributes?.name).toBe("Security Policy");
+    });
+  });
+
+  // Regression tests for wyre-technology/msp-claude-plugins#134: an org-wide
+  // search_documents returns only ROOT-LEVEL documents (IT Glue API limitation),
+  // so the model must be told the listing is partial or it reports the truncated
+  // count as the org's total ("this org has 1 document" for an org with 1,100+).
+  describe("rootLevelDocumentsNote", () => {
+    it("returns null when a folder filter scopes the search (result is complete)", () => {
+      expect(
+        rootLevelDocumentsNote({ folderFiltered: true, haveJwt: false })
+      ).toBeNull();
+      expect(
+        rootLevelDocumentsNote({ folderFiltered: true, haveJwt: true })
+      ).toBeNull();
+    });
+
+    it("warns that the listing is root-level-only for an unscoped search", () => {
+      const note = rootLevelDocumentsNote({ folderFiltered: false, haveJwt: true });
+      expect(note).toContain("ROOT-LEVEL");
+      expect(note).toContain("meta.total-count");
+      expect(note).toContain("list_document_folders");
+    });
+
+    it("tells API-key-only callers that folder enumeration needs a JWT", () => {
+      const note = rootLevelDocumentsNote({ folderFiltered: false, haveJwt: false });
+      expect(note).toContain("ITGLUE_JWT");
+      expect(note).toContain("cannot be listed");
     });
   });
 

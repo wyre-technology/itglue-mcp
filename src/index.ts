@@ -31,6 +31,7 @@ export {
   buildFolderPickerOptions,
   createDocumentWithContent,
   parseFolderReference,
+  rootLevelDocumentsNote,
 } from "./mcp-server.js";
 export type { GatewayCredentials, ITGlueRegion } from "./mcp-server.js";
 
