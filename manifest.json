@@ -16,13 +16,14 @@
     "mcp_config": {
       "command": "node",
       "args": ["${__dirname}/dist/index.js"],
-      "env": { "ITGLUE_API_KEY": "${user_config.itglue_api_key}", "ITGLUE_REGION": "${user_config.itglue_region}", "MCP_TRANSPORT": "stdio" }
+      "env": { "ITGLUE_API_KEY": "${user_config.itglue_api_key}", "ITGLUE_REGION": "${user_config.itglue_region}", "ITGLUE_JWT": "${user_config.itglue_jwt}", "MCP_TRANSPORT": "stdio" }
     }
   },
   "tools_generated": true,
   "user_config": {
     "itglue_api_key": { "type": "string", "title": "IT Glue API Key", "description": "Your IT Glue API key", "sensitive": true, "required": true },
-    "itglue_region": { "type": "string", "title": "IT Glue Region", "description": "Region: us or eu (default: us)", "sensitive": false, "required": false }
+    "itglue_region": { "type": "string", "title": "IT Glue Region", "description": "Region: us or eu (default: us)", "sensitive": false, "required": false },
+    "itglue_jwt": { "type": "string", "title": "IT Glue JWT (optional)", "description": "User-session JWT for elevated-scope operations such as document folder navigation. IT Glue's API-key scope cannot enumerate document folders; supplying a JWT enables it. JWTs are short-lived (~2h) and must be refreshed manually — see the README for how to retrieve one.", "sensitive": true, "required": false }
   },
   "compatibility": { "platforms": ["darwin", "win32", "linux"], "runtimes": { "node": ">=18.0.0" }, "claude_desktop": ">=0.10.0" }
 }

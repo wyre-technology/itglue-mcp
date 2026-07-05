@@ -454,6 +454,36 @@ export function parseFolderReference(input: string | null | undefined): FolderRe
   return { kind: "invalid", input: trimmed };
 }
 
+/**
+ * Advisory note for `search_documents` results.
+ *
+ * IT Glue's `/organizations/:id/relationships/documents` endpoint returns only
+ * ROOT-LEVEL documents unless `filter[document_folder_id]` is supplied — and
+ * folder enumeration itself needs a JWT (see `list_document_folders`). So an
+ * org-wide search on a heavily-foldered org can return a handful of documents
+ * (or none) even when the org holds thousands. Without a caveat the model
+ * reports that truncated count as authoritative ("this org has 1 document").
+ *
+ * Returns a note to prepend to the result, or null when a folder filter was
+ * applied (in which case the result is complete for that folder's scope).
+ */
+export function rootLevelDocumentsNote(opts: {
+  folderFiltered: boolean;
+  haveJwt: boolean;
+}): string | null {
+  if (opts.folderFiltered) return null;
+  return (
+    "NOTE: IT Glue's documents endpoint returns only ROOT-LEVEL documents unless a specific " +
+    "folder is queried. Documents inside folders are NOT included here and are NOT reflected in " +
+    "meta.total-count — do not report this as the organization's complete document count. " +
+    (opts.haveJwt
+      ? "To include foldered documents, call list_document_folders, then re-run search_documents " +
+        "with document_folder_id for each folder."
+      : "Folder enumeration requires a JWT credential (ITGLUE_JWT); without it, foldered documents " +
+        "cannot be listed. See list_document_folders and the README.")
+  );
+}
+
 // Credential extraction from gateway headers
 export interface GatewayCredentials {
   apiKey?: string;
@@ -1655,11 +1685,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             `/organizations/${args.organization_id}/relationships/documents`,
             params
           );
+          const note = rootLevelDocumentsNote({
+            folderFiltered: Boolean(args?.document_folder_id),
+            haveJwt: Boolean(sessionJwt ?? credentials.jwt),
+          });
+          const body = JSON.stringify(result, null, 2);
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify(result, null, 2),
+                text: note ? `${note}\n\n${body}` : body,
               },
             ],
           };
