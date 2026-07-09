@@ -1,5 +1,35 @@
 ## [Unreleased]
 
+### Changed
+
+- **API-key-first document folder access (JWT now an optional fallback):**
+  ([#55](https://github.com/wyre-technology/itglue-mcp/issues/55),
+  [msp-claude-plugins#134](https://github.com/wyre-technology/msp-claude-plugins/issues/134))
+  - `search_documents` now defaults to a folder-inclusive listing when no
+    `document_folder_id` is supplied: it sends
+    `filter[document_folder_id]=null` (which returns ALL documents, foldered
+    ones included), retries with the `filter[document_folder_id][ne]=` form if
+    the tenant's API rejects that (400/422), and only then degrades to the
+    legacy root-only listing — keeping the root-level-only warning for that
+    case. Each returned document carries its `documentFolderId`, so folder
+    membership is visible in the results. Explicit `document_folder_id`
+    searches are unchanged.
+  - `list_document_folders` tries the API key first (organization-relationship
+    path, then the top-level `/document_folders?filter[organization_id]=` form
+    if that 404s — IT Glue's public Document Folders resource is rolling out
+    across tenants through 2026 and may be exposed either way). The JWT client
+    is now only a fallback for tenants whose API key is rejected (401/403/404),
+    with the existing 401 JWT-cache-clear behavior retained.
+  - `create_document`'s name-based folder picker uses the same API-key-first,
+    JWT-fallback enumeration; the URL/ID folder prompt remains the last resort.
+  - Tool descriptions, error messages, and the README no longer describe the
+    JWT as a requirement for folder operations — it is an optional fallback,
+    only needed if your tenant's API key can't access Document Folders yet. All
+    JWT plumbing (`ITGLUE_JWT`, `X-ITGlue-JWT`, runtime paste) is unchanged.
+- **Publishing:** releases now publish `@wyre-technology/itglue-mcp` to the GitHub
+  Packages npm registry (`npmPublish: true`; `publishConfig.registry` was already
+  set to `https://npm.pkg.github.com`).
+
 ### Added
 
 - **Locations tools:** `search_locations`, `get_location`, `create_location`, and
@@ -21,12 +51,6 @@
   packages) without a 401 from `npm.pkg.github.com`. Note: unlike the other Wyre
   MCP servers, this one has no private runtime SDK dependency, so the one-click
   deploy buttons were never affected by the build-time 401.
-
-### Changed
-
-- **Publishing:** releases now publish `@wyre-technology/itglue-mcp` to the GitHub
-  Packages npm registry (`npmPublish: true`; `publishConfig.registry` was already
-  set to `https://npm.pkg.github.com`).
 
 ## [1.5.3](https://github.com/wyre-technology/itglue-mcp/compare/v1.5.2...v1.5.3) (2026-04-07)
 

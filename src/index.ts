@@ -30,10 +30,17 @@ export {
   ITGlueClient,
   buildFolderPickerOptions,
   createDocumentWithContent,
+  folderedDocumentsIncludedNote,
+  listDocumentFoldersViaApiKey,
   parseFolderReference,
+  requestDocumentsWithFolderDefault,
   rootLevelDocumentsNote,
 } from "./mcp-server.js";
-export type { GatewayCredentials, ITGlueRegion } from "./mcp-server.js";
+export type {
+  DocumentSearchAttempt,
+  GatewayCredentials,
+  ITGlueRegion,
+} from "./mcp-server.js";
 
 /**
  * Start with stdio transport (default for local/CLI usage)
