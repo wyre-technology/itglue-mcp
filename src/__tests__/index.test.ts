@@ -23,8 +23,11 @@ import {
   buildFolderPickerOptions,
   createDocumentWithContent,
   createMcpServer,
+  folderedDocumentsIncludedNote,
   ITGlueClient,
+  listDocumentFoldersViaApiKey,
   parseFolderReference,
+  requestDocumentsWithFolderDefault,
   rootLevelDocumentsNote,
 } from "../index.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -746,6 +749,8 @@ describe("Tool Handler Integration", () => {
   // search_documents returns only ROOT-LEVEL documents (IT Glue API limitation),
   // so the model must be told the listing is partial or it reports the truncated
   // count as the org's total ("this org has 1 document" for an org with 1,100+).
+  // Since issue #55 this note is only emitted when the folder-inclusive filter
+  // forms were rejected and the search degraded to the legacy root-only call.
   describe("rootLevelDocumentsNote", () => {
     it("returns null when a folder filter scopes the search (result is complete)", () => {
       expect(
@@ -763,10 +768,169 @@ describe("Tool Handler Integration", () => {
       expect(note).toContain("list_document_folders");
     });
 
-    it("tells API-key-only callers that folder enumeration needs a JWT", () => {
+    it("frames the JWT as an optional fallback (not a requirement) for API-key-only callers", () => {
       const note = rootLevelDocumentsNote({ folderFiltered: false, haveJwt: false });
       expect(note).toContain("ITGLUE_JWT");
-      expect(note).toContain("cannot be listed");
+      expect(note).toContain("fallback");
+      expect(note).not.toMatch(/requires a JWT/i);
+    });
+  });
+
+  describe("folderedDocumentsIncludedNote", () => {
+    it("tells the model foldered documents are included and how to read folder membership", () => {
+      const note = folderedDocumentsIncludedNote();
+      expect(note).toContain("includes documents inside folders");
+      expect(note).toContain("documentFolderId");
+    });
+  });
+
+  // Issue #55: search_documents defaults to a folder-INCLUSIVE listing
+  // (filter[document_folder_id]=null returns ALL documents), degrading through
+  // the [ne] filter form down to the legacy root-only call when the tenant's
+  // API rejects the filter.
+  describe("requestDocumentsWithFolderDefault", () => {
+    function newClient(): ITGlueClient {
+      return new ITGlueClient({ apiKey: "test-api-key", region: "us" });
+    }
+
+    function decodedUrl(callIndex: number): string {
+      return decodeURIComponent(mockFetch.mock.calls[callIndex][0] as string);
+    }
+
+    it("sends filter[document_folder_id]=null on the first attempt", async () => {
+      mockFetch.mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])));
+
+      const { attempt } = await requestDocumentsWithFolderDefault(newClient(), 123, {
+        page: { size: 50, number: 1 },
+      });
+
+      expect(attempt).toBe("null-filter");
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(decodedUrl(0)).toContain("/organizations/123/relationships/documents");
+      expect(decodedUrl(0)).toContain("filter[document_folder_id]=null");
+    });
+
+    it("preserves caller filters (e.g. name) alongside the folder default", async () => {
+      mockFetch.mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])));
+
+      await requestDocumentsWithFolderDefault(newClient(), 123, {
+        filter: { name: "Runbook" },
+        page: { size: 50, number: 1 },
+      });
+
+      expect(decodedUrl(0)).toContain("filter[name]=Runbook");
+      expect(decodedUrl(0)).toContain("filter[document_folder_id]=null");
+    });
+
+    it("retries with filter[document_folder_id][ne]= when the null form is rejected (400)", async () => {
+      mockFetch
+        .mockResolvedValueOnce(createErrorResponse(400, "bad filter"))
+        .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])));
+
+      const { attempt } = await requestDocumentsWithFolderDefault(newClient(), 123, {
+        page: { size: 50, number: 1 },
+      });
+
+      expect(attempt).toBe("ne-filter");
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(decodedUrl(1)).toContain("filter[document_folder_id][ne]=");
+    });
+
+    it("falls back to the unfiltered (root-only) call when both filter forms are rejected", async () => {
+      mockFetch
+        .mockResolvedValueOnce(createErrorResponse(400, "bad filter"))
+        .mockResolvedValueOnce(createErrorResponse(422, "unprocessable"))
+        .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])));
+
+      const { attempt } = await requestDocumentsWithFolderDefault(newClient(), 123, {
+        page: { size: 50, number: 1 },
+      });
+
+      expect(attempt).toBe("unfiltered");
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+      expect(decodedUrl(2)).not.toContain("document_folder_id");
+    });
+
+    it("propagates non-filter errors (404, 500) without degrading", async () => {
+      mockFetch.mockResolvedValueOnce(createErrorResponse(404, "Not Found"));
+
+      await expect(
+        requestDocumentsWithFolderDefault(newClient(), 123, {})
+      ).rejects.toThrow(/404/);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // Issue #55: folder enumeration is API-key-first. IT Glue's public API now
+  // documents a Document Folders resource (rolling out across tenants), so the
+  // JWT becomes a fallback rather than a requirement.
+  describe("listDocumentFoldersViaApiKey", () => {
+    function newClient(): ITGlueClient {
+      return new ITGlueClient({ apiKey: "test-api-key", region: "us" });
+    }
+
+    it("returns folders from the organization relationship path", async () => {
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(
+          createJsonApiResponse([
+            { id: "10", type: "document-folders", attributes: { name: "Runbooks" } },
+          ])
+        )
+      );
+
+      const result = await listDocumentFoldersViaApiKey(newClient(), 123, {});
+
+      expect(result).not.toBeNull();
+      expect((result!.data[0] as { name: string }).name).toBe("Runbooks");
+      expect(mockFetch.mock.calls[0][0]).toContain(
+        "/organizations/123/relationships/document_folders"
+      );
+    });
+
+    it("tries the top-level /document_folders form when the relationship path 404s", async () => {
+      mockFetch
+        .mockResolvedValueOnce(createErrorResponse(404, "Not Found"))
+        .mockResolvedValueOnce(
+          createMockResponse(
+            createJsonApiResponse([
+              { id: "10", type: "document-folders", attributes: { name: "Runbooks" } },
+            ])
+          )
+        );
+
+      const result = await listDocumentFoldersViaApiKey(newClient(), 123, {});
+
+      expect(result).not.toBeNull();
+      const secondUrl = decodeURIComponent(mockFetch.mock.calls[1][0] as string);
+      expect(secondUrl).toContain("/document_folders?");
+      expect(secondUrl).toContain("filter[organization_id]=123");
+    });
+
+    it("returns null (JWT-fallback signal) when the API key is rejected with 403", async () => {
+      mockFetch.mockResolvedValueOnce(createErrorResponse(403, "Forbidden"));
+
+      const result = await listDocumentFoldersViaApiKey(newClient(), 123, {});
+
+      expect(result).toBeNull();
+      // 403 means the key is rejected outright — no point probing the top-level path.
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns null when both paths 404 (resource not exposed on this tenant)", async () => {
+      mockFetch
+        .mockResolvedValueOnce(createErrorResponse(404, "Not Found"))
+        .mockResolvedValueOnce(createErrorResponse(404, "Not Found"));
+
+      const result = await listDocumentFoldersViaApiKey(newClient(), 123, {});
+
+      expect(result).toBeNull();
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("propagates unexpected errors (500) instead of silently falling back", async () => {
+      mockFetch.mockResolvedValueOnce(createErrorResponse(500, "boom"));
+
+      await expect(listDocumentFoldersViaApiKey(newClient(), 123, {})).rejects.toThrow(/500/);
     });
   });
 
@@ -2068,5 +2232,352 @@ describe("Locations tools (round-trip)", () => {
     });
     expect(isError(result)).toBe(true);
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+// Issue #55 round-trip coverage: exercises the REAL MCP server (CallTool) over
+// an in-memory transport pair so the API-key-first / JWT-fallback ordering in
+// the actual handlers is what's under test. fetch stays mocked underneath.
+describe("Document folder access (API-key-first, round-trip)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function connectClient(credentials: {
+    apiKey?: string;
+    jwt?: string;
+  }): Promise<Client> {
+    const server = createMcpServer(credentials);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "folders-test", version: "1.0.0" });
+    await client.connect(clientTransport);
+    return client;
+  }
+
+  function firstText(result: unknown): string {
+    const r = result as { content?: Array<{ text?: string }> };
+    return r.content?.[0]?.text ?? "";
+  }
+
+  function isError(result: unknown): boolean {
+    return (result as { isError?: boolean }).isError === true;
+  }
+
+  function decodedUrl(callIndex: number): string {
+    return decodeURIComponent(mockFetch.mock.calls[callIndex][0] as string);
+  }
+
+  function headersOf(callIndex: number): Record<string, string> {
+    return (mockFetch.mock.calls[callIndex][1] as RequestInit)
+      .headers as Record<string, string>;
+  }
+
+  describe("search_documents", () => {
+    it("defaults to filter[document_folder_id]=null and surfaces each doc's folder id", async () => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(
+          createJsonApiResponse([
+            {
+              id: "1",
+              type: "documents",
+              attributes: { name: "Foldered Doc", "document-folder-id": 42 },
+            },
+            {
+              id: "2",
+              type: "documents",
+              attributes: { name: "Root Doc", "document-folder-id": null },
+            },
+          ])
+        )
+      );
+
+      const result = await client.callTool({
+        name: "search_documents",
+        arguments: { organization_id: 123 },
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(decodedUrl(0)).toContain("filter[document_folder_id]=null");
+      const text = firstText(result);
+      expect(text).toContain("includes documents inside folders");
+      expect(text).not.toContain("ROOT-LEVEL");
+      // Folder membership is surfaced on each returned document.
+      expect(text).toContain('"documentFolderId": 42');
+    });
+
+    it("keeps exact current behavior for an explicit document_folder_id", async () => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(
+          createJsonApiResponse([
+            { id: "1", type: "documents", attributes: { name: "Doc" } },
+          ])
+        )
+      );
+
+      const result = await client.callTool({
+        name: "search_documents",
+        arguments: { organization_id: 123, document_folder_id: 42 },
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(decodedUrl(0)).toContain("filter[document-folder-id]=42");
+      expect(decodedUrl(0)).not.toContain("filter[document_folder_id]=null");
+      expect(firstText(result)).not.toContain("NOTE:");
+    });
+
+    it("degrades 400 → [ne] filter and still reports foldered docs included", async () => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      mockFetch
+        .mockResolvedValueOnce(createErrorResponse(400, "bad filter"))
+        .mockResolvedValueOnce(
+          createMockResponse(
+            createJsonApiResponse([
+              { id: "1", type: "documents", attributes: { name: "Doc" } },
+            ])
+          )
+        );
+
+      const result = await client.callTool({
+        name: "search_documents",
+        arguments: { organization_id: 123 },
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(decodedUrl(1)).toContain("filter[document_folder_id][ne]=");
+      expect(firstText(result)).toContain("includes documents inside folders");
+    });
+
+    it("degrades 400 → 422 → unfiltered and keeps the root-level-only warning", async () => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      mockFetch
+        .mockResolvedValueOnce(createErrorResponse(400, "bad filter"))
+        .mockResolvedValueOnce(createErrorResponse(422, "unprocessable"))
+        .mockResolvedValueOnce(
+          createMockResponse(
+            createJsonApiResponse([
+              { id: "1", type: "documents", attributes: { name: "Root Doc" } },
+            ])
+          )
+        );
+
+      const result = await client.callTool({
+        name: "search_documents",
+        arguments: { organization_id: 123 },
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+      expect(decodedUrl(2)).not.toContain("document_folder_id");
+      const text = firstText(result);
+      expect(text).toContain("ROOT-LEVEL");
+      expect(text).toContain("meta.total-count");
+    });
+
+    it("still maps a 404 to the Documents-module-missing message (no degradation)", async () => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      mockFetch.mockResolvedValueOnce(createErrorResponse(404, "Not Found"));
+
+      const result = await client.callTool({
+        name: "search_documents",
+        arguments: { organization_id: 123 },
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("Documents module");
+    });
+  });
+
+  describe("list_document_folders", () => {
+    it("succeeds with the API key alone (no JWT involved)", async () => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(
+          createJsonApiResponse([
+            { id: "10", type: "document-folders", attributes: { name: "Runbooks" } },
+          ])
+        )
+      );
+
+      const result = await client.callTool({
+        name: "list_document_folders",
+        arguments: { organization_id: 123 },
+      });
+
+      expect(isError(result)).toBe(false);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(decodedUrl(0)).toContain(
+        "/organizations/123/relationships/document_folders"
+      );
+      expect(headersOf(0)["x-api-key"]).toBe("test-api-key");
+      expect(headersOf(0)["Authorization"]).toBeUndefined();
+      expect(firstText(result)).toContain("Runbooks");
+    });
+
+    it("prefers the API key even when a JWT is also configured", async () => {
+      const client = await connectClient({ apiKey: "test-api-key", jwt: "test-jwt" });
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(
+          createJsonApiResponse([
+            { id: "10", type: "document-folders", attributes: { name: "Runbooks" } },
+          ])
+        )
+      );
+
+      const result = await client.callTool({
+        name: "list_document_folders",
+        arguments: { organization_id: 123 },
+      });
+
+      expect(isError(result)).toBe(false);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(headersOf(0)["x-api-key"]).toBe("test-api-key");
+      expect(headersOf(0)["Authorization"]).toBeUndefined();
+    });
+
+    it("falls back to the top-level /document_folders path when the relationship path 404s", async () => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      mockFetch
+        .mockResolvedValueOnce(createErrorResponse(404, "Not Found"))
+        .mockResolvedValueOnce(
+          createMockResponse(
+            createJsonApiResponse([
+              { id: "10", type: "document-folders", attributes: { name: "Runbooks" } },
+            ])
+          )
+        );
+
+      const result = await client.callTool({
+        name: "list_document_folders",
+        arguments: { organization_id: 123 },
+      });
+
+      expect(isError(result)).toBe(false);
+      expect(decodedUrl(1)).toContain("/document_folders?");
+      expect(decodedUrl(1)).toContain("filter[organization_id]=123");
+    });
+
+    it("falls back to the configured JWT when the API key is rejected with 403", async () => {
+      const client = await connectClient({ apiKey: "test-api-key", jwt: "test-jwt" });
+      mockFetch
+        .mockResolvedValueOnce(createErrorResponse(403, "Forbidden"))
+        .mockResolvedValueOnce(
+          createMockResponse(
+            createJsonApiResponse([
+              { id: "10", type: "document-folders", attributes: { name: "Runbooks" } },
+            ])
+          )
+        );
+
+      const result = await client.callTool({
+        name: "list_document_folders",
+        arguments: { organization_id: 123 },
+      });
+
+      expect(isError(result)).toBe(false);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(headersOf(0)["x-api-key"]).toBe("test-api-key");
+      expect(headersOf(1)["Authorization"]).toBe("Bearer test-jwt");
+      expect(firstText(result)).toContain("Runbooks");
+    });
+
+    it("returns an actionable error when the API key is rejected and no JWT is available", async () => {
+      // The in-memory test client does not support elicitation, so the JWT
+      // prompt yields nothing — the neither-credential-works path.
+      const client = await connectClient({ apiKey: "test-api-key" });
+      mockFetch.mockResolvedValueOnce(createErrorResponse(403, "Forbidden"));
+
+      const result = await client.callTool({
+        name: "list_document_folders",
+        arguments: { organization_id: 123 },
+      });
+
+      expect(isError(result)).toBe(true);
+      const text = firstText(result);
+      expect(text).toContain("Document Folders");
+      expect(text).toContain("ITGLUE_JWT");
+      expect(text).toContain("fallback");
+    });
+
+    it("clears the cached JWT when IT Glue rejects it with 401 (existing behavior)", async () => {
+      const client = await connectClient({ apiKey: "test-api-key", jwt: "stale-jwt" });
+      mockFetch
+        .mockResolvedValueOnce(createErrorResponse(403, "Forbidden")) // API key
+        .mockResolvedValueOnce(createErrorResponse(401, "Unauthorized")); // stale JWT
+
+      const result = await client.callTool({
+        name: "list_document_folders",
+        arguments: { organization_id: 123 },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("expired");
+    });
+  });
+
+  describe("create_document folder picker", () => {
+    it("enumerates folders with the API key first", async () => {
+      const client = await connectClient({ apiKey: "test-api-key", jwt: "test-jwt" });
+      mockFetch
+        .mockResolvedValueOnce(
+          createMockResponse(
+            createJsonApiResponse([
+              { id: "10", type: "document-folders", attributes: { name: "Runbooks" } },
+            ])
+          )
+        )
+        // Picker elicitation is unsupported by the test client → folderId stays
+        // undefined → the document is created at the root.
+        .mockResolvedValueOnce(
+          createMockResponse({
+            data: { id: "99", type: "documents", attributes: { name: "New Doc" } },
+          })
+        );
+
+      const result = await client.callTool({
+        name: "create_document",
+        arguments: { organization_id: 123, name: "New Doc" },
+      });
+
+      expect(isError(result)).toBe(false);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      // Folder enumeration used the API key, not the configured JWT.
+      expect(decodedUrl(0)).toContain(
+        "/organizations/123/relationships/document_folders"
+      );
+      expect(headersOf(0)["x-api-key"]).toBe("test-api-key");
+      expect(headersOf(0)["Authorization"]).toBeUndefined();
+      expect(decodedUrl(1)).toContain("/organizations/123/relationships/documents");
+    });
+
+    it("falls back to the configured JWT for folder enumeration when the API key is rejected", async () => {
+      const client = await connectClient({ apiKey: "test-api-key", jwt: "test-jwt" });
+      mockFetch
+        .mockResolvedValueOnce(createErrorResponse(403, "Forbidden")) // API key
+        .mockResolvedValueOnce(
+          createMockResponse(
+            createJsonApiResponse([
+              { id: "10", type: "document-folders", attributes: { name: "Runbooks" } },
+            ])
+          )
+        )
+        .mockResolvedValueOnce(
+          createMockResponse({
+            data: { id: "99", type: "documents", attributes: { name: "New Doc" } },
+          })
+        );
+
+      const result = await client.callTool({
+        name: "create_document",
+        arguments: { organization_id: 123, name: "New Doc" },
+      });
+
+      expect(isError(result)).toBe(false);
+      expect(headersOf(0)["x-api-key"]).toBe("test-api-key");
+      expect(headersOf(1)["Authorization"]).toBe("Bearer test-jwt");
+    });
   });
 });

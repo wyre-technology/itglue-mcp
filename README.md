@@ -48,7 +48,7 @@ The server accepts credentials via environment variables:
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `ITGLUE_API_KEY` | Your IT Glue API key (format: ITG.xxx) | Yes (env mode) |
-| `ITGLUE_JWT` | A user-session JWT for elevated-scope operations such as listing document folders. See [JWT for document-folder operations](#jwt-for-document-folder-operations). | No |
+| `ITGLUE_JWT` | A user-session JWT used as an optional **fallback** for document-folder operations on tenants whose API key cannot access the Document Folders resource yet. See [JWT fallback for document-folder operations](#jwt-fallback-for-document-folder-operations). | No |
 | `ITGLUE_REGION` | API region: `us`, `eu`, or `au` (default: `us`) | No |
 | `ITGLUE_BASE_URL` | Override the IT Glue API base URL (advanced) | No |
 | `MCP_TRANSPORT` | Transport: `stdio` (local) or `http` (remote). Defaults to `stdio` when run via `npx`/`node`, and to `http` in the Docker image. | No |
@@ -58,14 +58,15 @@ The server accepts credentials via environment variables:
 
 Alternative: When `AUTH_MODE=gateway`, the MCP Gateway injects credentials per request via HTTP headers instead of environment variables. See [Remote Deployment](#remote-deployment-http-streamable).
 
-### JWT for document-folder operations
+### JWT fallback for document-folder operations
 
-A handful of operations need more than an API key. IT Glue gates **document folders** behind a user-session JWT — the API-key scope can read and create documents, but it cannot enumerate folder names. Tools affected:
+**A JWT is optional** — it is only needed if your tenant's API key can't access Document Folders yet. Every folder-related path tries your API key first:
 
-- `list_document_folders` — fails without a JWT.
-- `create_document` — works without a JWT (falls back to a URL/ID folder prompt), but only offers the friendlier name-based folder picker when a JWT is present.
+- `search_documents` — defaults to a folder-inclusive listing (`filter[document_folder_id]=null` returns all documents, foldered ones included; each result carries its `documentFolderId`). If the tenant's API rejects that filter, the server retries the `[ne]` filter form and finally degrades to the legacy root-only listing, saying so in the result. No JWT is involved at any layer.
+- `list_document_folders` — IT Glue's public (API-key) API now documents a Document Folders resource, which is rolling out across tenants through 2026. The server tries the API key first (on the organization-relationship path, then the top-level `/document_folders` path) and only falls back to a JWT if the key is rejected.
+- `create_document` — the name-based folder picker uses the same API-key-first enumeration, then a configured JWT; if neither can list folders, it prompts for a folder URL / sibling-document URL / numeric folder ID as the last resort.
 
-Provide the JWT in whichever way matches your deployment:
+If you do need the JWT fallback, provide it in whichever way matches your deployment:
 
 | Mode | How to supply the JWT |
 |------|-----------------------|
@@ -73,7 +74,7 @@ Provide the JWT in whichever way matches your deployment:
 | Remote gateway (`AUTH_MODE=gateway`) | Send the `X-ITGlue-JWT` request header. |
 | Interactive clients (Claude Desktop/Code) | Leave it unset — the server prompts you to paste a JWT on first use and caches it for the session. |
 
-> **Headless deployments (Docker, cloud):** there is no one to answer the interactive prompt, so you **must** set `ITGLUE_JWT` (env mode) or send `X-ITGlue-JWT` (gateway mode) for folder enumeration to work.
+> **Headless deployments (Docker, cloud):** there is no one to answer the interactive prompt, so if your tenant's API key cannot enumerate folders you must set `ITGLUE_JWT` (env mode) or send `X-ITGlue-JWT` (gateway mode) for folder enumeration to work.
 
 **Retrieving a JWT from your browser:**
 
@@ -82,7 +83,7 @@ Provide the JWT in whichever way matches your deployment:
 3. Click any request to `itg-api-*.itglue.com`.
 4. Copy the value of the `Authorization: Bearer <token>` request header — the `<token>` part is your JWT.
 
-> **Expiry:** IT Glue JWTs are short-lived (~2 hours). A JWT placed in `ITGLUE_JWT` on a long-running container will go stale and folder enumeration will start failing until it is refreshed. Interactive clients are simply re-prompted on expiry. API-key-only operations (everything except folder enumeration) are unaffected.
+> **Expiry:** IT Glue JWTs are short-lived (~2 hours). A JWT placed in `ITGLUE_JWT` on a long-running container will go stale and the JWT fallback will start failing until it is refreshed. Interactive clients are simply re-prompted on expiry. API-key operations are unaffected.
 
 ## Available Tools
 
@@ -110,8 +111,8 @@ Provide the JWT in whichever way matches your deployment:
 
 ### Documents
 
-- **search_documents** - Search for documents with filtering by organization or name
-- **list_document_folders** - List an organization's document folders (names and IDs). Requires a JWT — see [JWT for document-folder operations](#jwt-for-document-folder-operations)
+- **search_documents** - Search for documents with filtering by organization, name, or folder. Defaults to a folder-inclusive listing (each result carries its `documentFolderId`), degrading gracefully to a root-only listing on tenants whose API rejects the folder filter
+- **list_document_folders** - List an organization's document folders (names and IDs). Works with an API key on tenants where IT Glue exposes the Document Folders resource; falls back to a JWT otherwise — see [JWT fallback for document-folder operations](#jwt-fallback-for-document-folder-operations)
 
 ### Flexible Assets
 

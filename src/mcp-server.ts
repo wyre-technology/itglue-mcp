@@ -98,12 +98,28 @@ function deserializeResource(resource: JsonApiResource): Record<string, unknown>
 function buildFilterParams(filter: Record<string, unknown>): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(filter)) {
-    if (value !== undefined && value !== null) {
-      const kebabKey = camelToKebab(key);
+    if (value === undefined || value === null) continue;
+    const kebabKey = camelToKebab(key);
+    if (typeof value === "object" && !Array.isArray(value)) {
+      // JSON:API filter operator form, e.g. { ne: "" } → filter[key][ne]=
+      for (const [op, opValue] of Object.entries(value as Record<string, unknown>)) {
+        result[`${kebabKey}][${op}`] = String(opValue ?? "");
+      }
+    } else {
       result[kebabKey] = String(value);
     }
   }
   return result;
+}
+
+/**
+ * Extract the HTTP status from an ITGlueClient error message
+ * ("IT Glue API error (404): ..."), or null for non-HTTP errors.
+ */
+function apiErrorStatus(err: unknown): number | null {
+  const msg = err instanceof Error ? err.message : String(err);
+  const match = msg.match(/IT Glue API error \((\d{3})\)/);
+  return match ? Number(match[1]) : null;
 }
 
 // Simple IT Glue client
@@ -365,11 +381,11 @@ export async function createDocumentWithContent(
 }
 
 /**
- * Parse a folder reference supplied by the user. Folder *names* are not
- * reachable with API-key auth (IT Glue gates `/document_folders` behind a
- * user-session JWT — see the README for the JWT escape hatch). So the
- * elicitation path accepts inputs the user can copy out of their browser
- * tab while looking at the folder they want:
+ * Parse a folder reference supplied by the user. This is the last-resort
+ * folder prompt for when folder *names* cannot be enumerated — i.e. the
+ * tenant's API key does not (yet) expose the Document Folders resource and no
+ * JWT fallback is available (see the README). It accepts inputs the user can
+ * copy out of their browser tab while looking at the folder they want:
  *
  *   - empty / whitespace → root
  *   - bare numeric id    → folder
@@ -385,8 +401,8 @@ export type FolderReference =
   | { kind: "invalid"; input: string };
 
 /**
- * IT Glue document folder resource shape (subset used by the JWT-required
- * picker path). Folders are nested via `parent-id` (kebab) on the wire; the
+ * IT Glue document folder resource shape (subset used by the folder-picker
+ * path). Folders are nested via `parent-id` (kebab) on the wire; the
  * helper also accepts `parent_id` defensively.
  */
 export interface DocumentFolderResource {
@@ -458,11 +474,13 @@ export function parseFolderReference(input: string | null | undefined): FolderRe
  * Advisory note for `search_documents` results.
  *
  * IT Glue's `/organizations/:id/relationships/documents` endpoint returns only
- * ROOT-LEVEL documents unless `filter[document_folder_id]` is supplied — and
- * folder enumeration itself needs a JWT (see `list_document_folders`). So an
- * org-wide search on a heavily-foldered org can return a handful of documents
- * (or none) even when the org holds thousands. Without a caveat the model
- * reports that truncated count as authoritative ("this org has 1 document").
+ * ROOT-LEVEL documents unless a `filter[document_folder_id]` is supplied. The
+ * handler defaults to `filter[document_folder_id]=null` (which — despite the
+ * name — returns ALL documents including foldered ones) so this note is only
+ * emitted when the tenant's API rejected both folder-inclusive filter forms
+ * and the search degraded to the legacy root-only listing. Without the caveat
+ * the model reports that truncated count as authoritative ("this org has 1
+ * document" for an org holding thousands).
  *
  * Returns a note to prepend to the result, or null when a folder filter was
  * applied (in which case the result is complete for that folder's scope).
@@ -473,15 +491,135 @@ export function rootLevelDocumentsNote(opts: {
 }): string | null {
   if (opts.folderFiltered) return null;
   return (
-    "NOTE: IT Glue's documents endpoint returns only ROOT-LEVEL documents unless a specific " +
-    "folder is queried. Documents inside folders are NOT included here and are NOT reflected in " +
-    "meta.total-count — do not report this as the organization's complete document count. " +
+    "NOTE: this listing contains only ROOT-LEVEL documents. The folder-inclusive filter forms " +
+    "(filter[document_folder_id]=null and its [ne] variant) were rejected by this IT Glue tenant's " +
+    "API, so the search degraded to the legacy root-only listing. Documents inside folders are NOT " +
+    "included here and are NOT reflected in meta.total-count — do not report this as the " +
+    "organization's complete document count. To include foldered documents, call " +
+    "list_document_folders, then re-run search_documents with document_folder_id for each folder." +
     (opts.haveJwt
-      ? "To include foldered documents, call list_document_folders, then re-run search_documents " +
-        "with document_folder_id for each folder."
-      : "Folder enumeration requires a JWT credential (ITGLUE_JWT); without it, foldered documents " +
-        "cannot be listed. See list_document_folders and the README.")
+      ? ""
+      : " list_document_folders works with an API key on tenants where IT Glue exposes the " +
+        "Document Folders resource; a JWT (ITGLUE_JWT) is only needed as a fallback if it does not. " +
+        "See the README.")
   );
+}
+
+/**
+ * Advisory note prepended to `search_documents` results when the
+ * folder-inclusive listing succeeded: tells the model how to read folder
+ * membership off each document instead of assuming a flat listing.
+ */
+export function folderedDocumentsIncludedNote(): string {
+  return (
+    "NOTE: this listing includes documents inside folders. Each document's documentFolderId " +
+    "identifies its folder (null/absent = organization root). Use list_document_folders to " +
+    "resolve folder names."
+  );
+}
+
+/** Which filter form ultimately produced a `search_documents` listing. */
+export type DocumentSearchAttempt = "null-filter" | "ne-filter" | "unfiltered";
+
+/**
+ * Fetch an organization's documents, defaulting to a folder-INCLUSIVE listing.
+ *
+ * IT Glue's documents relationship endpoint returns only root-level documents
+ * unless `filter[document_folder_id]` is supplied. Passing the literal value
+ * `null` returns ALL documents (foldered ones included); the
+ * `filter[document_folder_id][ne]=` form is a community-verified alternative.
+ * Layered degradation, so tenants whose API rejects either form still work:
+ *
+ *   1. `filter[document_folder_id]=null`   → all documents
+ *   2. `filter[document_folder_id][ne]=`   → all documents (alternate form)
+ *   3. unfiltered                          → root-level only (legacy)
+ *
+ * Only a 400/422 (filter rejected) triggers the next layer — anything else
+ * (401/404/5xx) propagates to the caller unchanged.
+ */
+export async function requestDocumentsWithFolderDefault(
+  client: ITGlueClient,
+  organizationId: number | string,
+  params: Record<string, unknown>
+): Promise<{
+  result: { data: unknown[]; meta: PaginationMeta };
+  attempt: DocumentSearchAttempt;
+}> {
+  const path = `/organizations/${organizationId}/relationships/documents`;
+  const withFolderFilter = (folderFilter: Record<string, unknown>) => ({
+    ...params,
+    filter: { ...((params.filter as Record<string, unknown>) ?? {}), ...folderFilter },
+  });
+  const filterRejected = (err: unknown) => {
+    const status = apiErrorStatus(err);
+    return status === 400 || status === 422;
+  };
+
+  try {
+    const result = await client.request(path, withFolderFilter({ document_folder_id: "null" }));
+    return { result, attempt: "null-filter" };
+  } catch (err) {
+    if (!filterRejected(err)) throw err;
+  }
+
+  try {
+    const result = await client.request(path, withFolderFilter({ document_folder_id: { ne: "" } }));
+    return { result, attempt: "ne-filter" };
+  } catch (err) {
+    if (!filterRejected(err)) throw err;
+  }
+
+  const result = await client.request(path, params);
+  return { result, attempt: "unfiltered" };
+}
+
+/**
+ * Enumerate an organization's document folders using API-key auth.
+ *
+ * IT Glue's public API now documents a Document Folders resource, but the
+ * rollout across tenants (2026) means a given tenant may expose it at the
+ * organization relationship path, at the top level, or not at all. Tries the
+ * relationship path first, then `/document_folders?filter[organization_id]=`
+ * if that 404s.
+ *
+ * Returns the folder listing on success, or null when the API key was
+ * rejected (401/403) or the resource is not exposed (404) — the caller should
+ * fall back to JWT auth. Any other error propagates unchanged.
+ */
+export async function listDocumentFoldersViaApiKey(
+  client: ITGlueClient,
+  organizationId: number | string,
+  params: Record<string, unknown>
+): Promise<{ data: unknown[]; meta: PaginationMeta } | null> {
+  const apiKeyBlocked = (err: unknown) => {
+    const status = apiErrorStatus(err);
+    return status === 401 || status === 403 || status === 404;
+  };
+
+  try {
+    return await client.request(
+      `/organizations/${organizationId}/relationships/document_folders`,
+      params
+    );
+  } catch (err) {
+    if (!apiKeyBlocked(err)) throw err;
+    if (apiErrorStatus(err) !== 404) return null;
+  }
+
+  // The relationship path 404'd — the tenant may expose the public resource
+  // only at the top level.
+  try {
+    return await client.request("/document_folders", {
+      ...params,
+      filter: {
+        ...((params.filter as Record<string, unknown>) ?? {}),
+        organization_id: organizationId,
+      },
+    });
+  } catch (err) {
+    if (!apiKeyBlocked(err)) throw err;
+    return null;
+  }
 }
 
 // Credential extraction from gateway headers
@@ -959,7 +1097,7 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
       },
       {
         name: "list_document_folders",
-        description: "List document folders for an organization in IT Glue, returning their names and IDs. Requires a JWT credential (configure via ITGLUE_JWT env var or X-ITGlue-JWT header, or paste one when prompted) — IT Glue's API key scope does not include folder enumeration.",
+        description: "List document folders for an organization in IT Glue, returning their names and IDs. Works with your API key on tenants where IT Glue exposes the Document Folders resource (rolling out across tenants in 2026). If the API key is rejected, a JWT is used as a fallback (configure via ITGLUE_JWT env var or X-ITGlue-JWT header, or paste one when prompted).",
         inputSchema: {
           type: "object",
           properties: {
@@ -985,7 +1123,7 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
       },
       {
         name: "create_document",
-        description: "Create a new document in IT Glue for an organization. If neither document_folder_id nor skip_folder_prompt is supplied, the user is prompted to pick a folder. When a JWT credential is configured, the prompt is a name-based picker (preferred UX); otherwise it accepts a folder URL, a sibling-document URL, or a numeric folder ID (since folder names are not in API-key scope). Pass skip_folder_prompt=true to always create at the organization root without prompting.",
+        description: "Create a new document in IT Glue for an organization. If neither document_folder_id nor skip_folder_prompt is supplied, the user is prompted to pick a folder. Folder enumeration for the name-based picker tries the API key first (works on tenants where IT Glue exposes the Document Folders resource), then a configured JWT; if neither can list folders, the prompt accepts a folder URL, a sibling-document URL, or a numeric folder ID. Pass skip_folder_prompt=true to always create at the organization root without prompting.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1271,7 +1409,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const ensureJwt = async (reason: string): Promise<string | null> => {
     if (sessionJwt) return sessionJwt;
     const elicited = await elicitText(
-      `${reason} IT Glue requires a JWT for this operation (folder names and similar resources are not in API-key scope). Paste your IT Glue JWT — find it in browser DevTools → Network → any request to itg-api-*.itglue.com → Authorization: Bearer <token>. JWT expires in ~2h; you'll be re-prompted on expiry. NOTE: this token will appear in your conversation transcript.`,
+      `${reason} Your API key could not access this resource (your IT Glue tenant may not expose Document Folders to API keys yet — the rollout runs through 2026), so a JWT is needed as a fallback. Paste your IT Glue JWT — find it in browser DevTools → Network → any request to itg-api-*.itglue.com → Authorization: Bearer <token>. JWT expires in ~2h; you'll be re-prompted on expiry. NOTE: this token will appear in your conversation transcript.`,
       "jwt",
       "IT Glue JWT (e.g. eyJ0eXAiOiJKV1Qi...)"
     );
@@ -1681,14 +1819,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         try {
-          const result = await client.request(
-            `/organizations/${args.organization_id}/relationships/documents`,
-            params
-          );
-          const note = rootLevelDocumentsNote({
-            folderFiltered: Boolean(args?.document_folder_id),
-            haveJwt: Boolean(sessionJwt ?? credentials.jwt),
-          });
+          let result: { data: unknown[]; meta: PaginationMeta };
+          let note: string | null;
+
+          if (args?.document_folder_id) {
+            // Explicit folder scope — single request, result is complete for
+            // that folder, no caveat needed.
+            result = await client.request(
+              `/organizations/${args.organization_id}/relationships/documents`,
+              params
+            );
+            note = null;
+          } else {
+            // No folder scope — default to the folder-INCLUSIVE listing, with
+            // layered degradation down to the legacy root-only call.
+            const attempted = await requestDocumentsWithFolderDefault(
+              client,
+              args.organization_id as number | string,
+              params
+            );
+            result = attempted.result;
+            note =
+              attempted.attempt === "unfiltered"
+                ? rootLevelDocumentsNote({
+                    folderFiltered: false,
+                    haveJwt: Boolean(sessionJwt ?? credentials.jwt),
+                  })
+                : folderedDocumentsIncludedNote();
+          }
+
           const body = JSON.stringify(result, null, 2);
           return {
             content: [
@@ -1735,16 +1894,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
-        const jwtClient = await getJwtClient("Listing IT Glue document folders.");
-        if (!jwtClient) {
-          return {
-            content: [{
-              type: "text",
-              text: "list_document_folders requires a JWT credential. Configure ITGLUE_JWT (env) or X-ITGlue-JWT (header), or paste one when prompted. See README for how to retrieve a JWT from your browser.",
-            }],
-            isError: true,
-          };
-        }
         const params: Record<string, unknown> = {};
         const filter: Record<string, unknown> = {};
         if (args?.name) filter.name = args.name;
@@ -1753,6 +1902,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           size: (args?.page_size as number) || 50,
           number: (args?.page_number as number) || 1,
         };
+
+        // API-key first: IT Glue is rolling out a public Document Folders
+        // resource, so most tenants no longer need a JWT here. Fall back to
+        // JWT auth only when the API key is rejected (401/403/404).
+        if (effectiveCredentials.apiKey) {
+          const apiKeyClient = createClient({ ...effectiveCredentials, jwt: undefined });
+          const apiKeyResult = await listDocumentFoldersViaApiKey(
+            apiKeyClient,
+            args.organization_id as number | string,
+            params
+          );
+          if (apiKeyResult) {
+            return {
+              content: [{ type: "text", text: JSON.stringify(apiKeyResult, null, 2) }],
+            };
+          }
+        }
+
+        const jwtClient = await getJwtClient("Listing IT Glue document folders.");
+        if (!jwtClient) {
+          return {
+            content: [{
+              type: "text",
+              text: "Could not list document folders. API-key access requires your IT Glue tenant's API to expose the Document Folders resource (IT Glue is rolling this out across tenants in 2026; yours does not appear to have it yet), and no JWT was available as a fallback. Configure ITGLUE_JWT (env) or X-ITGlue-JWT (header), or paste one when prompted. See README for how to retrieve a JWT from your browser.",
+            }],
+            isError: true,
+          };
+        }
         try {
           const result = await jwtClient.request(
             `/organizations/${args.organization_id}/relationships/document_folders`,
@@ -1789,34 +1966,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const skipPrompt = args.skip_folder_prompt === true;
 
         if (folderId === undefined && !skipPrompt) {
-          // Prefer the name-based picker when a JWT is already configured —
-          // it's the better UX and uses the credential the caller has
-          // already opted into. Otherwise fall back to the URL/ID parser
-          // (which works with API-key auth alone).
-          const haveJwt = Boolean(sessionJwt ?? credentials.jwt);
-          let pickerUsed = false;
+          // Enumerate folders for the name-based picker: API key first (IT
+          // Glue is rolling out a public Document Folders resource), then a
+          // JWT the caller has already configured. If neither can list
+          // folders, fall back to the URL/ID parser as the last resort.
+          const pickerParams = { page: { size: 1000, number: 1 } };
+          let folders: DocumentFolderResource[] | null = null;
 
-          if (haveJwt) {
+          if (effectiveCredentials.apiKey) {
+            const apiKeyClient = createClient({ ...effectiveCredentials, jwt: undefined });
+            const apiKeyResult = await listDocumentFoldersViaApiKey(
+              apiKeyClient,
+              args.organization_id as number | string,
+              pickerParams
+            );
+            if (apiKeyResult) {
+              folders = apiKeyResult.data as DocumentFolderResource[];
+            }
+          }
+
+          if (folders === null && Boolean(sessionJwt ?? credentials.jwt)) {
             const jwtClient = await getJwtClient("Listing folders to pick from.");
             if (jwtClient) {
               try {
                 const foldersResp = await jwtClient.request(
                   `/organizations/${args.organization_id}/relationships/document_folders`,
-                  { page: { size: 1000, number: 1 } }
+                  pickerParams
                 ) as { data?: DocumentFolderResource[] };
-                const folders = foldersResp?.data ?? [];
-                if (folders.length > 0) {
-                  pickerUsed = true;
-                  const choice = await elicitSelection(
-                    `Which folder should "${args.name}" go in?`,
-                    "folder",
-                    buildFolderPickerOptions(folders)
-                  );
-                  if (choice && choice !== "__root__") {
-                    folderId = choice;
-                  }
-                  // null choice (declined/unsupported) or "__root__" → folderId stays undefined.
-                }
+                folders = foldersResp?.data ?? [];
               } catch (err) {
                 // 401 invalidates the cached JWT and falls through to the URL
                 // parser; any other error propagates because something is
@@ -1829,6 +2006,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 }
               }
             }
+          }
+
+          let pickerUsed = false;
+          if (folders && folders.length > 0) {
+            pickerUsed = true;
+            const choice = await elicitSelection(
+              `Which folder should "${args.name}" go in?`,
+              "folder",
+              buildFolderPickerOptions(folders)
+            );
+            if (choice && choice !== "__root__") {
+              folderId = choice;
+            }
+            // null choice (declined/unsupported) or "__root__" → folderId stays undefined.
           }
 
           if (!pickerUsed) {
