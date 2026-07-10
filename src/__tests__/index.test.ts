@@ -2466,6 +2466,47 @@ describe("Document folder access (API-key-first, round-trip)", () => {
     });
   });
 
+  // search_documents strips bodies to stay small, so the full document body MUST
+  // remain reachable through get_document — that is the read path the list tool
+  // points callers to. This pins it so a future change can't silently strip the
+  // read path too (issue #55).
+  describe("get_document (full-body read path)", () => {
+    it("returns the complete document body, unstripped", async () => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: {
+            id: "20022034",
+            type: "documents",
+            attributes: {
+              name: "00-1 READ ME",
+              "document-folder-id": 6262993,
+              content: [
+                { id: 9, resource: { content: "<p>FULL_BODY_MARKER</p>" } },
+              ],
+            },
+          },
+          meta: {},
+        })
+      );
+
+      const result = await client.callTool({
+        name: "get_document",
+        arguments: { organization_id: 8250506, id: 20022034 },
+      });
+
+      const text = firstText(result);
+      // The body the list tool omits is present here in full.
+      expect(text).toContain("FULL_BODY_MARKER");
+      expect(text).toContain('"content"');
+      expect(text).toContain("00-1 READ ME");
+      // Fetched from the single-document relationship endpoint.
+      expect(decodedUrl(0)).toContain(
+        "/organizations/8250506/relationships/documents/20022034"
+      );
+    });
+  });
+
   describe("list_document_folders", () => {
     it("succeeds with the API key alone (no JWT involved)", async () => {
       const client = await connectClient({ apiKey: "test-api-key" });
