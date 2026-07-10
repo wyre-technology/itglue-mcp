@@ -44,6 +44,19 @@
 
 ### Fixed
 
+- **`search_documents` no longer inlines document bodies, which made foldered
+  organizations hang.** ([#55](https://github.com/wyre-technology/itglue-mcp/issues/55))
+  IT Glue's documents LIST endpoint embeds each document's full sectioned body
+  under `content` (~90% of the payload). After the folder-inclusive default
+  landed, an org-wide `search_documents` returned *every* document — each with
+  its full body — so a heavily-foldered org (e.g. 1,100+ documents) produced a
+  multi-megabyte response that exceeded the MCP client's limit and appeared to
+  hang with no error (subfolders enumerated fine, but viewing the documents
+  inside them failed). `search_documents` now strips the body from every result
+  (an 84% size reduction on a representative page) and returns metadata only —
+  `name`, `documentFolderId`, `resourceUrl`, timestamps, etc. Full bodies remain
+  available through `get_document` and `list_document_sections`. Applies to both
+  the folder-inclusive default and explicit `document_folder_id` searches.
 - **GitHub Packages auth:** `.npmrc` now reads a `read:packages` token from
   `NODE_AUTH_TOKEN`, and the README install instructions document the required
   `export NODE_AUTH_TOKEN=$(gh auth token)` step so consumers can install the

@@ -30,11 +30,13 @@ export {
   ITGlueClient,
   buildFolderPickerOptions,
   createDocumentWithContent,
+  documentBodyOmittedNote,
   folderedDocumentsIncludedNote,
   listDocumentFoldersViaApiKey,
   parseFolderReference,
   requestDocumentsWithFolderDefault,
   rootLevelDocumentsNote,
+  stripDocumentBodies,
 } from "./mcp-server.js";
 export type {
   DocumentSearchAttempt,
