@@ -29,6 +29,7 @@ import {
   parseFolderReference,
   requestDocumentsWithFolderDefault,
   rootLevelDocumentsNote,
+  stripDocumentBodies,
 } from "../index.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -781,6 +782,29 @@ describe("Tool Handler Integration", () => {
       const note = folderedDocumentsIncludedNote();
       expect(note).toContain("includes documents inside folders");
       expect(note).toContain("documentFolderId");
+    });
+  });
+
+  // Issue #55 follow-up: IT Glue's documents LIST endpoint inlines every
+  // document's full sectioned body under `content`, dominating the payload and
+  // making foldered orgs exceed the MCP client's response limit. search_documents
+  // must return metadata only.
+  describe("stripDocumentBodies", () => {
+    it("removes the content array while preserving all other document fields", () => {
+      const stripped = stripDocumentBodies([
+        {
+          id: "1",
+          name: "Doc",
+          documentFolderId: 42,
+          content: [{ id: 9, resource: { content: "<p>body</p>" } }],
+        },
+      ]);
+      expect(stripped).toEqual([{ id: "1", name: "Doc", documentFolderId: 42 }]);
+    });
+
+    it("leaves documents without a content field untouched", () => {
+      const docs = [{ id: "2", name: "Root Doc", documentFolderId: null }];
+      expect(stripDocumentBodies(docs)).toEqual(docs);
     });
   });
 
@@ -2308,12 +2332,58 @@ describe("Document folder access (API-key-first, round-trip)", () => {
       expect(text).toContain('"documentFolderId": 42');
     });
 
-    it("keeps exact current behavior for an explicit document_folder_id", async () => {
+    it("omits heavy document body content from list results (metadata only)", async () => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      // IT Glue's documents list endpoint embeds each document's full sectioned
+      // body in a `content` array. Passing that straight through makes list
+      // responses enormous (a single foldered org can exceed the MCP client's
+      // limit and hang with no error — issue #55). search_documents is a
+      // LIST/SEARCH tool: it must return lightweight metadata, not full bodies.
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(
+          createJsonApiResponse([
+            {
+              id: "1",
+              type: "documents",
+              attributes: {
+                name: "Change Management SOP",
+                "document-folder-id": 42,
+                content: [
+                  { id: 9, resource: { content: "<p>HEAVY_BODY_MARKER</p>" } },
+                ],
+              },
+            },
+          ])
+        )
+      );
+
+      const result = await client.callTool({
+        name: "search_documents",
+        arguments: { organization_id: 123 },
+      });
+
+      const text = firstText(result);
+      // Metadata the model needs to list/locate documents is preserved.
+      expect(text).toContain("Change Management SOP");
+      expect(text).toContain('"documentFolderId": 42');
+      // The full body is NOT inlined — it belongs to get_document.
+      expect(text).not.toContain("HEAVY_BODY_MARKER");
+      expect(text).not.toContain('"content"');
+    });
+
+    it("issues a single kebab-case filter request for an explicit document_folder_id", async () => {
       const client = await connectClient({ apiKey: "test-api-key" });
       mockFetch.mockResolvedValueOnce(
         createMockResponse(
           createJsonApiResponse([
-            { id: "1", type: "documents", attributes: { name: "Doc" } },
+            {
+              id: "1",
+              type: "documents",
+              attributes: {
+                name: "Doc",
+                content: [{ id: 9, resource: { content: "HEAVY_BODY_MARKER" } }],
+              },
+            },
           ])
         )
       );
@@ -2326,7 +2396,12 @@ describe("Document folder access (API-key-first, round-trip)", () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
       expect(decodedUrl(0)).toContain("filter[document-folder-id]=42");
       expect(decodedUrl(0)).not.toContain("filter[document_folder_id]=null");
-      expect(firstText(result)).not.toContain("NOTE:");
+      // No folder-inclusive caveat for an explicit scope, but bodies are still
+      // stripped (the per-folder listing inlines full bodies too — issue #55).
+      const text = firstText(result);
+      expect(text).not.toContain("includes documents inside folders");
+      expect(text).toContain("document bodies are omitted");
+      expect(text).not.toContain("HEAVY_BODY_MARKER");
     });
 
     it("degrades 400 → [ne] filter and still reports foldered docs included", async () => {
@@ -2388,6 +2463,47 @@ describe("Document folder access (API-key-first, round-trip)", () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
       expect(isError(result)).toBe(true);
       expect(firstText(result)).toContain("Documents module");
+    });
+  });
+
+  // search_documents strips bodies to stay small, so the full document body MUST
+  // remain reachable through get_document — that is the read path the list tool
+  // points callers to. This pins it so a future change can't silently strip the
+  // read path too (issue #55).
+  describe("get_document (full-body read path)", () => {
+    it("returns the complete document body, unstripped", async () => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: {
+            id: "20022034",
+            type: "documents",
+            attributes: {
+              name: "00-1 READ ME",
+              "document-folder-id": 6262993,
+              content: [
+                { id: 9, resource: { content: "<p>FULL_BODY_MARKER</p>" } },
+              ],
+            },
+          },
+          meta: {},
+        })
+      );
+
+      const result = await client.callTool({
+        name: "get_document",
+        arguments: { organization_id: 8250506, id: 20022034 },
+      });
+
+      const text = firstText(result);
+      // The body the list tool omits is present here in full.
+      expect(text).toContain("FULL_BODY_MARKER");
+      expect(text).toContain('"content"');
+      expect(text).toContain("00-1 READ ME");
+      // Fetched from the single-document relationship endpoint.
+      expect(decodedUrl(0)).toContain(
+        "/organizations/8250506/relationships/documents/20022034"
+      );
     });
   });
 

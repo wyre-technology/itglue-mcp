@@ -518,6 +518,40 @@ export function folderedDocumentsIncludedNote(): string {
   );
 }
 
+/**
+ * Strip each document's full body from a `search_documents` listing.
+ *
+ * IT Glue's documents list endpoint embeds every document's full sectioned body
+ * in a `content` array. That body dominates the payload — on a heavily-foldered
+ * org it is ~90% of the bytes — so passing it through makes the list response so
+ * large it can exceed the MCP client's response limit and hang with no error
+ * (issue #55: folder enumeration works, but viewing the documents inside chokes).
+ * search_documents is a LIST/SEARCH tool, so it returns metadata only; full-body
+ * retrieval stays with get_document / list_document_sections.
+ *
+ * Coupled to IT Glue's current field name: the body arrives as a top-level
+ * `content` key (deserializeResource flattens `attributes` and camelCases keys).
+ * If IT Glue renames the body field or adds another heavy one, revisit this.
+ */
+export function stripDocumentBodies(docs: unknown[]): unknown[] {
+  return docs.map((doc) => {
+    if (doc && typeof doc === "object" && "content" in doc) {
+      const { content: _body, ...rest } = doc as Record<string, unknown>;
+      return rest;
+    }
+    return doc;
+  });
+}
+
+/** Advisory that document bodies are omitted from `search_documents` results. */
+export function documentBodyOmittedNote(): string {
+  return (
+    "NOTE: document bodies are omitted from these results to keep the listing small — each " +
+    "item is metadata only. Call get_document (or list_document_sections) to read a specific " +
+    "document's content."
+  );
+}
+
 /** Which filter form ultimately produced a `search_documents` listing. */
 export type DocumentSearchAttempt = "null-filter" | "ne-filter" | "unfiltered";
 
@@ -1045,7 +1079,7 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
       // Documents
       {
         name: "search_documents",
-        description: "Search for documents in IT Glue (scoped to an organization)",
+        description: "Search for documents in IT Glue (scoped to an organization). Returns document metadata only (name, folder, URL, timestamps) — not the document body. Use get_document or list_document_sections to read a specific document's content.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1848,14 +1882,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 : folderedDocumentsIncludedNote();
           }
 
-          const body = JSON.stringify(result, null, 2);
+          // Drop each document's full body — search_documents is a list tool,
+          // and IT Glue's list endpoint inlines the entire sectioned body per
+          // document, which can balloon the response past the client's limit
+          // (issue #55). Bodies stay available via get_document.
+          const trimmed = { ...result, data: stripDocumentBodies(result.data) };
+          const text = [documentBodyOmittedNote(), note, JSON.stringify(trimmed, null, 2)]
+            .filter(Boolean)
+            .join("\n\n");
           return {
-            content: [
-              {
-                type: "text",
-                text: note ? `${note}\n\n${body}` : body,
-              },
-            ],
+            content: [{ type: "text", text }],
           };
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
