@@ -664,13 +664,68 @@ export interface GatewayCredentials {
   baseUrl?: string;
 }
 
-export function getCredentialsFromEnv(): GatewayCredentials {
+// An unresolved MCPB/DXT manifest placeholder, e.g. "${user_config.itglue_jwt}".
+// Desktop hosts inject the config template verbatim when its optional user_config
+// field is left blank, so the literal string arrives in the env var / header.
+const CONFIG_PLACEHOLDER = /^\$\{.*\}$/;
+
+/**
+ * Normalise a single credential read from an env var or gateway header.
+ *
+ * Returns `undefined` for values that are effectively absent, so the auth layer
+ * treats them as "no credential" rather than a real secret:
+ *   - undefined / empty / whitespace-only
+ *   - an unresolved manifest placeholder like `${user_config.itglue_jwt}`
+ *
+ * Root cause of issue #73: a blank optional JWT field left the literal
+ * `${user_config.itglue_jwt}` in ITGLUE_JWT. Because a JWT overrides the API key
+ * (see ITGlueClient.authHeaders), every request went out as
+ * `Authorization: Bearer ${user_config.itglue_jwt}` and 401'd — even with a valid
+ * API key configured. Stripping the placeholder here lets the API key take over.
+ */
+export function cleanCredential(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || CONFIG_PLACEHOLDER.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+// Warn at most once per field so a stray placeholder surfaces in the server log
+// (a clear diagnostic for the operator) without spamming it on every tool call.
+const warnedPlaceholderFields = new Set<string>();
+function warnPlaceholderOnce(field: string): void {
+  if (warnedPlaceholderFields.has(field)) return;
+  warnedPlaceholderFields.add(field);
+  console.error(
+    `[itglue-mcp] Ignoring ${field}: value is an unresolved config placeholder ` +
+      `(e.g. "\${user_config...}"), not a real credential. This usually means an ` +
+      `optional field was left blank in your MCP client config. (issue #73)`
+  );
+}
+
+/**
+ * Sanitise every field of a credential set at ingress, dropping empty and
+ * unresolved-placeholder values. Applied to both credential sources (env and
+ * gateway headers) so a placeholder never reaches the auth layer as a secret.
+ */
+export function sanitizeCredentials(creds: GatewayCredentials): GatewayCredentials {
+  if (creds.jwt && CONFIG_PLACEHOLDER.test(creds.jwt.trim())) {
+    warnPlaceholderOnce("ITGLUE_JWT / X-ITGlue-JWT");
+  }
   return {
+    apiKey: cleanCredential(creds.apiKey),
+    jwt: cleanCredential(creds.jwt),
+    region: (cleanCredential(creds.region) ?? "us") as ITGlueRegion,
+    baseUrl: cleanCredential(creds.baseUrl),
+  };
+}
+
+export function getCredentialsFromEnv(): GatewayCredentials {
+  return sanitizeCredentials({
     apiKey: process.env.ITGLUE_API_KEY || process.env.X_API_KEY,
     jwt: process.env.ITGLUE_JWT,
     region: (process.env.ITGLUE_REGION || "us") as ITGlueRegion,
     baseUrl: process.env.ITGLUE_BASE_URL,
-  };
+  });
 }
 
 export function createClient(credentials: GatewayCredentials): ITGlueClient {
@@ -1407,7 +1462,9 @@ let sessionJwt: string | undefined;
 // Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
-  const credentials = credentialOverrides ?? getCredentialsFromEnv();
+  const credentials = credentialOverrides
+    ? sanitizeCredentials(credentialOverrides)
+    : getCredentialsFromEnv();
 
   // Seed the session JWT slot from credentials on first call (avoids
   // recomputing every tool invocation).

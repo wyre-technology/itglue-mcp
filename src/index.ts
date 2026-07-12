@@ -26,7 +26,9 @@ import {
 export {
   createMcpServer,
   createClient,
+  cleanCredential,
   getCredentialsFromEnv,
+  sanitizeCredentials,
   ITGlueClient,
   buildFolderPickerOptions,
   createDocumentWithContent,
