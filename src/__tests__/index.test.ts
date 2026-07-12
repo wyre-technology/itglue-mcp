@@ -21,9 +21,12 @@ vi.stubGlobal("fetch", mockFetch);
 // server during tests.
 import {
   buildFolderPickerOptions,
+  cleanCredential,
+  createClient,
   createDocumentWithContent,
   createMcpServer,
   folderedDocumentsIncludedNote,
+  getCredentialsFromEnv,
   ITGlueClient,
   listDocumentFoldersViaApiKey,
   parseFolderReference,
@@ -425,6 +428,71 @@ describe("Credential Validation", () => {
 
     const region = process.env.ITGLUE_REGION || "us";
     expect(region).toBe("eu");
+  });
+});
+
+// Regression tests for issue #73: on v1.14.1 the desktop (MCPB) install 401'd
+// every request. The manifest maps ITGLUE_JWT/ITGLUE_REGION to ${user_config.*};
+// when the optional itglue_jwt field is left blank the host injects the literal,
+// unresolved string "${user_config.itglue_jwt}". The server read that as a JWT
+// and — because a JWT overrides the API key — sent
+// `Authorization: Bearer ${user_config.itglue_jwt}` on every call, so a valid
+// API key never got a chance. Credentials must be sanitised at ingress.
+describe("issue #73: unresolved MCPB config placeholders", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env = { ...originalEnv };
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it("cleanCredential drops empty, whitespace, and ${...} placeholder values", () => {
+    expect(cleanCredential(undefined)).toBeUndefined();
+    expect(cleanCredential("")).toBeUndefined();
+    expect(cleanCredential("   ")).toBeUndefined();
+    expect(cleanCredential("${user_config.itglue_jwt}")).toBeUndefined();
+    expect(cleanCredential("  ${user_config.itglue_jwt}  ")).toBeUndefined();
+  });
+
+  it("cleanCredential preserves and trims real credentials", () => {
+    expect(cleanCredential("eyJ0eXAiOiJKV1Qi.real.jwt")).toBe("eyJ0eXAiOiJKV1Qi.real.jwt");
+    expect(cleanCredential("  real-api-key  ")).toBe("real-api-key");
+  });
+
+  it("getCredentialsFromEnv ignores a placeholder ITGLUE_JWT but keeps the API key", () => {
+    process.env.ITGLUE_API_KEY = "real-api-key";
+    process.env.ITGLUE_JWT = "${user_config.itglue_jwt}";
+
+    const creds = getCredentialsFromEnv();
+
+    expect(creds.apiKey).toBe("real-api-key");
+    expect(creds.jwt).toBeUndefined();
+  });
+
+  it("falls back to region 'us' when ITGLUE_REGION is an unresolved placeholder", () => {
+    process.env.ITGLUE_API_KEY = "real-api-key";
+    process.env.ITGLUE_REGION = "${user_config.itglue_region}";
+
+    expect(getCredentialsFromEnv().region).toBe("us");
+  });
+
+  it("authenticates with the API key, not a bogus Bearer placeholder (the 401 repro)", async () => {
+    process.env.ITGLUE_API_KEY = "real-api-key";
+    process.env.ITGLUE_JWT = "${user_config.itglue_jwt}";
+
+    let captured: Record<string, string> = {};
+    mockFetch.mockImplementation((_url: string, options: RequestInit) => {
+      captured = options.headers as Record<string, string>;
+      return createMockResponse(createJsonApiResponse([]));
+    });
+
+    const client = createClient(getCredentialsFromEnv());
+    await client.request("/organizations", {});
+
+    expect(captured["x-api-key"]).toBe("real-api-key");
+    expect(captured["Authorization"]).toBeUndefined();
   });
 });
 
