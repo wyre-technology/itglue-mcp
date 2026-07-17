@@ -32,6 +32,34 @@
 
 ### Added
 
+- **Interactive document card via MCP Apps (SEP-1865).** `get_document` results now
+  render as an interactive card in MCP Apps hosts (Claude Desktop/web, and other
+  hosts advertising the `io.modelcontextprotocol/ui` extension), instead of a wall
+  of JSON. The card shows the document name, organization, folder, archive state,
+  key dates, and a short plain-text preview of the document's sections. IT Glue is
+  a documentation system, so the card is read-only — there is no in-card write
+  round-trip. Non-App hosts are unaffected: the tool's JSON payload is unchanged
+  apart from a new `_card` field.
+  - The renderable tool advertises the UI via `_meta` (`ui/resourceUri`, plus the
+    nested `ui.resourceUri` form) pointing at a new `ui://itglue/document-card.html`
+    resource served as `text/html;profile=mcp-app`. The card HTML is a
+    self-contained vite single-file bundle embedded at build time
+    (`src/generated/document-card-html.ts`, committed), so it serves identically
+    from stdio, Node HTTP, and the fs-less Cloudflare Workers runtime. The server
+    now declares the `resources` capability and answers `resources/list` /
+    `resources/read` (`src/resources.ts`).
+  - The card is neutral by default (system fonts, no vendor identity, no external
+    fetches) and brandable via `window.__BRAND__` injection or `MCP_BRAND_*` env
+    vars (`MCP_BRAND_NAME`, `MCP_BRAND_LOGO_URL`, `MCP_BRAND_PRIMARY_COLOR`,
+    `MCP_BRAND_ACCENT_COLOR`, `MCP_BRAND_BG`, `MCP_BRAND_TEXT`): at serve time the
+    server replaces the card's BRAND_INJECT marker with an inline, `<`-escaped
+    `window.__BRAND__` script, so self-hosters can theme the card without
+    rebuilding. No brand configured = HTML served unchanged.
+  - The card payload builder is best-effort: a failed section fetch degrades the
+    card (or drops it) without affecting the tool result. 20 new contract tests in
+    `src/__tests__/mcp-apps.test.ts` pin the `_meta` advertisement, the `ui://`
+    resource wire shape, the neutral-default/brand-injection behavior, and the
+    card normalization.
 - **Locations tools:** `search_locations`, `get_location`, `create_location`, and
   `update_location` for IT Glue's built-in Locations entity (physical
   addresses/sites). Locations carry an organization's address fields and phone

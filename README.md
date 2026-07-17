@@ -112,6 +112,7 @@ If you do need the JWT fallback, provide it in whichever way matches your deploy
 ### Documents
 
 - **search_documents** - Search for documents with filtering by organization, name, or folder. Defaults to a folder-inclusive listing (each result carries its `documentFolderId`), degrading gracefully to a root-only listing on tenants whose API rejects the folder filter
+- **get_document** - Get a specific document by ID, including its sectioned body. Renders as an interactive card in MCP Apps hosts — see [Interactive Document Card](#interactive-document-card-mcp-apps)
 - **list_document_folders** - List an organization's document folders (names and IDs). Works with an API key on tenants where IT Glue exposes the Document Folders resource; falls back to a JWT otherwise — see [JWT fallback for document-folder operations](#jwt-fallback-for-document-folder-operations)
 
 ### Flexible Assets
@@ -121,6 +122,16 @@ If you do need the JWT fallback, provide it in whichever way matches your deploy
 ### Utility
 
 - **itglue_health_check** - Verify connectivity to IT Glue API
+
+### Interactive Document Card (MCP Apps)
+
+`get_document` renders as an interactive card in MCP Apps hosts (Claude
+Desktop/web) showing the document's name, organization, folder, key dates, and a
+plain-text preview of its sections; plain-JSON behavior is unchanged in other
+hosts. The card is read-only — neutral by default, brandable via
+`window.__BRAND__` injection or `MCP_BRAND_*` env vars (`MCP_BRAND_NAME`,
+`MCP_BRAND_LOGO_URL`, `MCP_BRAND_PRIMARY_COLOR`, `MCP_BRAND_ACCENT_COLOR`,
+`MCP_BRAND_BG`, `MCP_BRAND_TEXT`) — no rebuild needed.
 
 ## Usage with Claude Code
 
