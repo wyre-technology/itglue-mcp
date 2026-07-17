@@ -18,6 +18,8 @@ import {
 import { setServerRef } from "./utils/server-ref.js";
 import { elicitSelection, elicitText } from "./utils/elicitation.js";
 import { registerPromptHandlers } from "./prompts.js";
+import { registerResourceHandlers } from "./resources.js";
+import { buildDocumentCard, DOCUMENT_CARD_META } from "./card.builder.js";
 
 
 // IT Glue region configuration
@@ -754,6 +756,7 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
       capabilities: {
         tools: {},
         prompts: {},
+        resources: {},
       },
     }
   );
@@ -761,6 +764,9 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
 
   // Register prompt handlers
   registerPromptHandlers(server);
+
+  // Register resource handlers (MCP Apps document card, SEP-1865)
+  registerResourceHandlers(server);
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
@@ -1169,6 +1175,7 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
       {
         name: "get_document",
         description: "Get a specific document by ID from IT Glue",
+        _meta: DOCUMENT_CARD_META,
         inputSchema: {
           type: "object",
           properties: {
@@ -1972,11 +1979,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
-        const doc = await client.get(
+        const doc = await client.get<Record<string, unknown>>(
           `/organizations/${args.organization_id}/relationships/documents/${args.id}`
         );
+        const payload: Record<string, unknown> = { ...doc };
+
+        // MCP Apps: attach the normalized card payload the ui:// document
+        // card renders from. Best-effort — a null card just means no UI
+        // surface, and the model-visible payload is otherwise unchanged.
+        const card = await buildDocumentCard(payload, client);
+        if (card) payload._card = card;
+
         return {
-          content: [{ type: "text", text: JSON.stringify(doc, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
         };
       }
 
