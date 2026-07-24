@@ -15,7 +15,6 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { setServerRef } from "./utils/server-ref.js";
 import { elicitSelection, elicitText } from "./utils/elicitation.js";
 import { registerPromptHandlers } from "./prompts.js";
 import { registerResourceHandlers } from "./resources.js";
@@ -745,6 +744,12 @@ export function createClient(credentials: GatewayCredentials): ITGlueClient {
 /**
  * Create a fresh MCP Server with all tool handlers registered.
  * Called per-request in HTTP (stateless) mode so each initialize gets a clean server.
+ *
+ * The returned server is NOT registered as "the" server anywhere here —
+ * callers are responsible for binding it into the per-request `server-ref`
+ * AsyncLocalStorage context (via `runWithServerRef` / `bindServerRef`) so
+ * elicitation helpers resolve the right server even after await gaps. See
+ * `utils/server-ref.ts` for why this matters.
  */
 export function createMcpServer(credentialOverrides?: GatewayCredentials): Server {
   const server = new Server(
@@ -760,7 +765,6 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
       },
     }
   );
-  setServerRef(server);
 
   // Register prompt handlers
   registerPromptHandlers(server);
