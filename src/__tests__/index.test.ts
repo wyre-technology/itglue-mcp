@@ -2792,27 +2792,36 @@ describe("user metrics", () => {
       expect(buildUserMetricsDateFilter(undefined, undefined)).toEqual({ value: null });
     });
 
-    it("uses * for an open boundary", () => {
+    it("allows an open END, which IT Glue accepts", () => {
+      // Verified live 2026-08-06: "2026-08-01,*" → 200.
       expect(buildUserMetricsDateFilter("2026-01-01", undefined)).toEqual({
         value: "2026-01-01,*",
       });
-      expect(buildUserMetricsDateFilter(undefined, "2026-01-07")).toEqual({
-        value: "*,2026-01-07",
+    });
+
+    it("refuses an open START, which IT Glue rejects outright", () => {
+      // Verified live 2026-08-06: "*,2026-08-07" → 422 "cannot start with a
+      // wildcard". An end_date alone is a guaranteed error, not a narrowing.
+      const result = buildUserMetricsDateFilter(undefined, "2026-01-07");
+      expect((result as { error: string }).error).toContain("requires a start_date");
+    });
+
+    it("accepts a 7-day end-to-start difference (8 calendar days)", () => {
+      // Verified live 2026-08-06: 2026-08-01,2026-08-08 → 200. The server
+      // compares the difference, not the inclusive count, so this is legal.
+      expect(buildUserMetricsDateFilter("2026-01-01", "2026-01-08")).toEqual({
+        value: "2026-01-01,2026-01-08",
       });
     });
 
-    it("accepts an inclusive 7-day span", () => {
-      // 01-01..01-07 is 7 days inclusive — the documented maximum, not 8.
-      expect(buildUserMetricsDateFilter("2026-01-01", "2026-01-07")).toEqual({
-        value: "2026-01-01,2026-01-07",
-      });
-    });
-
-    it("rejects an 8-day span before it reaches the API", () => {
-      const result = buildUserMetricsDateFilter("2026-01-01", "2026-01-08");
+    it("rejects an 8-day difference, matching the live 422 boundary", () => {
+      // Verified live 2026-08-06: 2026-08-01,2026-08-09 → 422.
+      const result = buildUserMetricsDateFilter("2026-01-01", "2026-01-09");
       expect(result).toHaveProperty("error");
       expect((result as { error: string }).error).toContain("8 days");
       expect((result as { error: string }).error).toContain("at most 7");
+      // Names the widest legal end for this start, so the caller can retry.
+      expect((result as { error: string }).error).toContain("2026-01-08");
     });
 
     it("rejects an inverted range", () => {
@@ -2856,7 +2865,7 @@ describe("user metrics", () => {
         organization_id: 8637099,
         resource_type: "Configuration",
         start_date: "2026-01-01",
-        end_date: "2026-01-07",
+        end_date: "2026-01-08",
       },
     });
 
@@ -2865,7 +2874,7 @@ describe("user metrics", () => {
     expect(url).toContain("filter[user-id]=42");
     expect(url).toContain("filter[organization-id]=8637099");
     expect(url).toContain("filter[resource-type]=Configuration");
-    expect(url).toContain("filter[date]=2026-01-01,2026-01-07");
+    expect(url).toContain("filter[date]=2026-01-01,2026-01-08");
     expect(textOf(result)).toContain("Configuration");
   });
 

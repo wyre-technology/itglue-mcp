@@ -123,9 +123,16 @@ If you do need the JWT fallback, provide it in whichever way matches your deploy
 
 - **search_user_metrics** - Search user activity metrics: per-user, per-organization, per-resource-type counts of `created` / `viewed` / `edited` / `deleted` actions, bucketed by date. Filter by `user_id`, `organization_id`, `resource_type`, and a `start_date` / `end_date` range; sort by `id`, `created`, `viewed`, `edited`, `deleted`, or `date` (prefix `-` for descending).
 
-  **The API caps a query at one week of dates.** IT Glue rejects longer spans for performance reasons, and its rejection is a generic 4xx that reads like a bad filter key — so the tool enforces the limit itself and returns an actionable message instead of spending the call. Omit both dates to let IT Glue apply its own default window; supply one to leave the other boundary open.
-
   This is the raw data behind IT Glue's user reputation scores, so it answers "who is actually maintaining documentation" — per tech, per client, per resource type.
+
+  **Date-range rules** (verified live against `api.itglue.com`, 2026-08-06):
+
+  - The range may span at most **7 days end-to-start** — so `2026-08-01,2026-08-08` is accepted (8 calendar days) and `2026-08-01,2026-08-09` returns 422. The API compares the *difference*, not the inclusive day count; reading "longer than a week" as 7 inclusive days is off by one in the direction that rejects valid queries.
+  - **`end_date` requires `start_date`.** IT Glue rejects a filter beginning with a wildcard (`*,2026-08-07` → 422), so an end alone is a guaranteed error rather than a narrower query. An open *end* (`2026-08-01,*`) is fine.
+  - Both violations return the **same** 422 title — *"date range filter cannot be longer than a week, and cannot start with a wildcard"* — so the API cannot tell you which one you hit. The tool checks both itself and says which, without spending the call.
+  - Omit both dates to let IT Glue apply its own default window.
+
+  **Gotcha — unknown filter keys are silently ignored.** `filter[not-a-real-key]=x` returns HTTP 200 with the *full unfiltered* result set, not an error (verified live). A typo'd or misremembered filter name therefore looks like a successful, correctly-scoped query while actually returning everything. Cross-check row counts against a deliberately impossible value (`filter[resource-type]=ZZZNoSuchType` correctly returns 0 rows) if a result looks too broad.
 
 ### Utility
 

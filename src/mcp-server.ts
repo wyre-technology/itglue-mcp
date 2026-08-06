@@ -83,18 +83,38 @@ export const USER_METRIC_SORT_FIELDS = [
 ] as const;
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-const USER_METRICS_MAX_RANGE_DAYS = 7;
+
+/**
+ * Maximum end-minus-start difference IT Glue accepts on `filter[date]`.
+ *
+ * Verified live 2026-08-06 against api.itglue.com by bisection:
+ *   2026-08-01,2026-08-08  (diff 7) → 200
+ *   2026-08-01,2026-08-09  (diff 8) → 422
+ * So the server compares the *difference*, not the inclusive day count — a
+ * range spanning 8 calendar days is legal. The docs' phrase "longer than a
+ * week" is the difference, and reading it as an inclusive count (7 days) is
+ * off by one in the direction that rejects valid queries.
+ */
+const USER_METRICS_MAX_RANGE_DIFF_DAYS = 7;
 
 /**
  * Build the `filter[date]` value for /user_metrics, or return an error string.
  *
- * IT Glue expects `start,end` with `*` standing in for an open boundary, and
- * documents that "date ranges longer than a week may be disallowed for
- * performance reasons". That cap is enforced HERE rather than left to the API
- * because the server's rejection is a generic 4xx that reads like a bad filter
- * key — an agent retrying it would tune the wrong parameter. Returns null when
- * neither bound is supplied, so the caller omits the filter entirely and lets
- * IT Glue apply its own default window.
+ * IT Glue expects `start,end` with `*` for an open boundary. Two rules are
+ * enforced here rather than left to the API, both verified live 2026-08-06:
+ *
+ *  1. **Range cap.** A difference over 7 days returns 422 with the title
+ *     "date range filter cannot be longer than a week, and cannot start with
+ *     a wildcard" — one message for two distinct faults, so it cannot tell a
+ *     caller which one they hit. We say which.
+ *
+ *  2. **No open start.** `*,2026-08-07` is rejected outright (422); only the
+ *     END may be a wildcard. `2026-08-01,*` and the degenerate `*,*` both
+ *     return 200. So an `end_date` without a `start_date` is not a narrower
+ *     query — it is a guaranteed error, and we refuse it before the call.
+ *
+ * Returns null when neither bound is supplied, so the caller omits the filter
+ * and lets IT Glue apply its own default window.
  */
 export function buildUserMetricsDateFilter(
   startDate?: string,
@@ -111,6 +131,15 @@ export function buildUserMetricsDateFilter(
 
   if (!startDate && !endDate) return { value: null };
 
+  if (!startDate && endDate) {
+    return {
+      error:
+        `end_date requires a start_date. IT Glue rejects a date filter that begins with a ` +
+        `wildcard ("*,${endDate}" → 422), so an open start is not a valid narrowing — ` +
+        `supply start_date, or omit both to use the default window.`,
+    };
+  }
+
   if (startDate && endDate) {
     const start = Date.parse(`${startDate}T00:00:00Z`);
     const end = Date.parse(`${endDate}T00:00:00Z`);
@@ -120,18 +149,19 @@ export function buildUserMetricsDateFilter(
     if (end < start) {
       return { error: `end_date (${endDate}) is before start_date (${startDate})` };
     }
-    // Inclusive span: 2026-01-01..2026-01-07 is 7 days, not 6.
-    const spanDays = Math.round((end - start) / 86_400_000) + 1;
-    if (spanDays > USER_METRICS_MAX_RANGE_DAYS) {
+    const diffDays = Math.round((end - start) / 86_400_000);
+    if (diffDays > USER_METRICS_MAX_RANGE_DIFF_DAYS) {
       return {
         error:
-          `Date range is ${spanDays} days; IT Glue allows at most ${USER_METRICS_MAX_RANGE_DAYS}. ` +
-          `Narrow the range and page through it — the API rejects longer spans for performance reasons.`,
+          `Date range spans ${diffDays} days end-to-start; IT Glue allows at most ` +
+          `${USER_METRICS_MAX_RANGE_DIFF_DAYS} (so ${startDate} through ` +
+          `${new Date(start + USER_METRICS_MAX_RANGE_DIFF_DAYS * 86_400_000).toISOString().slice(0, 10)} ` +
+          `is the widest window from this start). Narrow the range and page through it.`,
       };
     }
   }
 
-  return { value: `${startDate ?? "*"},${endDate ?? "*"}` };
+  return { value: `${startDate},${endDate ?? "*"}` };
 }
 
 function convertKeysToCamel(obj: Record<string, unknown>): Record<string, unknown> {
@@ -1518,7 +1548,8 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
         description:
           "Search IT Glue user activity metrics — per-user, per-organization, per-resource-type " +
           "counts of created/viewed/edited/deleted actions, bucketed by date. This is the raw data " +
-          "behind IT Glue's user reputation scores. Note the API caps a query at ONE WEEK of dates.",
+          "behind IT Glue's user reputation scores. The date range may span at most 7 days " +
+          "end-to-start; end_date requires a start_date (IT Glue rejects an open start).",
         inputSchema: {
           type: "object",
           properties: {
