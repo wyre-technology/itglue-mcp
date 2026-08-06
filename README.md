@@ -119,6 +119,14 @@ If you do need the JWT fallback, provide it in whichever way matches your deploy
 
 - **search_flexible_assets** - Search for flexible assets (requires flexible_asset_type_id)
 
+### User Metrics
+
+- **search_user_metrics** - Search user activity metrics: per-user, per-organization, per-resource-type counts of `created` / `viewed` / `edited` / `deleted` actions, bucketed by date. Filter by `user_id`, `organization_id`, `resource_type`, and a `start_date` / `end_date` range; sort by `id`, `created`, `viewed`, `edited`, `deleted`, or `date` (prefix `-` for descending).
+
+  **The API caps a query at one week of dates.** IT Glue rejects longer spans for performance reasons, and its rejection is a generic 4xx that reads like a bad filter key — so the tool enforces the limit itself and returns an actionable message instead of spending the call. Omit both dates to let IT Glue apply its own default window; supply one to leave the other boundary open.
+
+  This is the raw data behind IT Glue's user reputation scores, so it answers "who is actually maintaining documentation" — per tech, per client, per resource type.
+
 ### Utility
 
 - **itglue_health_check** - Verify connectivity to IT Glue API

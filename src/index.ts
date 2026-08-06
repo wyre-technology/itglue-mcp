@@ -32,6 +32,8 @@ export {
   sanitizeCredentials,
   ITGlueClient,
   buildFolderPickerOptions,
+  buildUserMetricsDateFilter,
+  USER_METRIC_SORT_FIELDS,
   createDocumentWithContent,
   documentBodyOmittedNote,
   folderedDocumentsIncludedNote,

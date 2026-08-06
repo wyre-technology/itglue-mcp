@@ -20,6 +20,7 @@ vi.stubGlobal("fetch", mockFetch);
 // its main() bootstrap on NODE_ENV=test so this import does not start an MCP
 // server during tests.
 import {
+  buildUserMetricsDateFilter,
   buildFolderPickerOptions,
   cleanCredential,
   createClient,
@@ -356,6 +357,7 @@ describe("Tool Definitions", () => {
     { name: "unarchive_document", requiredFields: ["document_id"], properties: ["document_id"] },
     { name: "search_flexible_assets", requiredFields: ["flexible_asset_type_id"], properties: ["flexible_asset_type_id", "organization_id", "name", "page_size", "page_number", "sort"] },
     { name: "list_flexible_asset_types", requiredFields: [], properties: ["organization_id"] },
+    { name: "search_user_metrics", requiredFields: [] as string[], properties: ["user_id", "organization_id", "resource_type", "start_date", "end_date", "sort", "page_size", "page_number"] },
     { name: "itglue_health_check", requiredFields: [] as string[], properties: [] as string[] },
   ];
 
@@ -370,8 +372,8 @@ describe("Tool Definitions", () => {
     });
   });
 
-  it("should have 24 tools total", () => {
-    expect(tools.length).toBe(24);
+  it("should have 25 tools total", () => {
+    expect(tools.length).toBe(25);
   });
 });
 
@@ -2164,10 +2166,10 @@ describe("Locations tools (round-trip)", () => {
     );
   });
 
-  it("exposes 24 tools total", async () => {
+  it("exposes 25 tools total", async () => {
     const client = await connectLocationsClient();
     const { tools } = await client.listTools();
-    expect(tools.length).toBe(24);
+    expect(tools.length).toBe(25);
   });
 
   it("search_locations queries /locations filtered by organization and city", async () => {
@@ -2763,5 +2765,156 @@ describe("Document folder access (API-key-first, round-trip)", () => {
       expect(headersOf(0)["x-api-key"]).toBe("test-api-key");
       expect(headersOf(1)["Authorization"]).toBe("Bearer test-jwt");
     });
+  });
+});
+
+describe("user metrics", () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  async function connectClient(): Promise<Client> {
+    const server = createMcpServer({ apiKey: "test-api-key" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "user-metrics-test", version: "1.0.0" });
+    await client.connect(clientTransport);
+    return client;
+  }
+
+  function textOf(result: unknown): string {
+    const r = result as { content?: Array<{ text?: string }> };
+    return r.content?.[0]?.text ?? "";
+  }
+
+  describe("buildUserMetricsDateFilter", () => {
+    it("returns null when neither bound is given, so the filter is omitted", () => {
+      expect(buildUserMetricsDateFilter(undefined, undefined)).toEqual({ value: null });
+    });
+
+    it("uses * for an open boundary", () => {
+      expect(buildUserMetricsDateFilter("2026-01-01", undefined)).toEqual({
+        value: "2026-01-01,*",
+      });
+      expect(buildUserMetricsDateFilter(undefined, "2026-01-07")).toEqual({
+        value: "*,2026-01-07",
+      });
+    });
+
+    it("accepts an inclusive 7-day span", () => {
+      // 01-01..01-07 is 7 days inclusive — the documented maximum, not 8.
+      expect(buildUserMetricsDateFilter("2026-01-01", "2026-01-07")).toEqual({
+        value: "2026-01-01,2026-01-07",
+      });
+    });
+
+    it("rejects an 8-day span before it reaches the API", () => {
+      const result = buildUserMetricsDateFilter("2026-01-01", "2026-01-08");
+      expect(result).toHaveProperty("error");
+      expect((result as { error: string }).error).toContain("8 days");
+      expect((result as { error: string }).error).toContain("at most 7");
+    });
+
+    it("rejects an inverted range", () => {
+      const result = buildUserMetricsDateFilter("2026-01-07", "2026-01-01");
+      expect((result as { error: string }).error).toContain("before start_date");
+    });
+
+    it("rejects a non-ISO date rather than forwarding it", () => {
+      const result = buildUserMetricsDateFilter("01/01/2026", undefined);
+      expect((result as { error: string }).error).toContain("YYYY-MM-DD");
+    });
+  });
+
+  it("queries /user_metrics with kebab-case filters and a composed date range", async () => {
+    const client = await connectClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(
+        createJsonApiResponse([
+          {
+            id: "1",
+            type: "user_metrics",
+            attributes: {
+              "user-id": 42,
+              "organization-id": 8637099,
+              "resource-type": "Configuration",
+              created: 3,
+              viewed: 17,
+              edited: 2,
+              deleted: 0,
+              date: "2026-01-02",
+            },
+          },
+        ])
+      )
+    );
+
+    const result = await client.callTool({
+      name: "search_user_metrics",
+      arguments: {
+        user_id: 42,
+        organization_id: 8637099,
+        resource_type: "Configuration",
+        start_date: "2026-01-01",
+        end_date: "2026-01-07",
+      },
+    });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).toContain("/user_metrics?");
+    expect(url).toContain("filter[user-id]=42");
+    expect(url).toContain("filter[organization-id]=8637099");
+    expect(url).toContain("filter[resource-type]=Configuration");
+    expect(url).toContain("filter[date]=2026-01-01,2026-01-07");
+    expect(textOf(result)).toContain("Configuration");
+  });
+
+  it("omits filter[date] entirely when no dates are supplied", async () => {
+    const client = await connectClient();
+    mockFetch.mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])));
+
+    await client.callTool({ name: "search_user_metrics", arguments: { user_id: 42 } });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).toContain("filter[user-id]=42");
+    expect(url).not.toContain("filter[date]");
+  });
+
+  it("rejects an over-long range without calling the API", async () => {
+    const client = await connectClient();
+
+    const result = await client.callTool({
+      name: "search_user_metrics",
+      arguments: { start_date: "2026-01-01", end_date: "2026-02-01" },
+    });
+
+    // The point of the client-side cap: no wasted call, and an actionable
+    // message instead of IT Glue's generic 4xx.
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    expect(textOf(result)).toContain("at most 7");
+  });
+
+  it("rejects an unsupported sort field without calling the API", async () => {
+    const client = await connectClient();
+
+    const result = await client.callTool({
+      name: "search_user_metrics",
+      arguments: { sort: "-organization_id" },
+    });
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    expect(textOf(result)).toContain("sort must be one of");
+  });
+
+  it("accepts a descending sort on a supported field", async () => {
+    const client = await connectClient();
+    mockFetch.mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])));
+
+    await client.callTool({ name: "search_user_metrics", arguments: { sort: "-date" } });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).toContain("sort=-date");
   });
 });
