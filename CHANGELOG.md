@@ -125,6 +125,25 @@
 
 ### Fixed
 
+- **The password tools had no effective test coverage — the suite was green
+  because the "tests" tested their own mock.** The five cases under
+  `describe("search_passwords")` / `describe("get_password")` in
+  `src/__tests__/index.test.ts` mocked `fetch`, then called `fetch` *directly*
+  and asserted on the payload the mock had just been handed. The
+  `search_passwords` / `get_password` handlers were never executed, so nothing
+  about the real request — the URL, the JSON:API filter keys, the
+  `show_password` flag, error propagation — was covered, and a regression in
+  either handler could ship with a fully green suite. The tell: the handler
+  names appeared only as `describe()` strings, never as a call. Replaced with a
+  `Password tools (round-trip)` block that drives the REAL server over an
+  `InMemoryTransport` pair (the idiom already used by the locations and
+  document-folder suites), covering: organization scoping and the forced
+  `show_password=false` on list calls, name/username/category filter
+  pass-through, `show_password` defaulting to true on `get_password` and
+  honouring an explicit `false`, the missing-`id` guard, and an IT Glue 404
+  surfacing as an error rather than an empty result. Net +2 tests (7 real
+  replacing 5 hollow) and, for the first time, real coverage of the handlers.
+
 - **`search_documents` no longer inlines document bodies, which made foldered
   organizations hang.** ([#55](https://github.com/wyre-technology/itglue-mcp/issues/55))
   IT Glue's documents LIST endpoint embeds each document's full sectioned body

@@ -691,101 +691,6 @@ describe("Tool Handler Integration", () => {
     });
   });
 
-  describe("search_passwords", () => {
-    it("should search passwords without showing password values", async () => {
-      const mockData = createJsonApiResponse([
-        {
-          id: "1",
-          type: "passwords",
-          attributes: {
-            name: "Admin Password",
-            username: "admin",
-            url: "https://example.com",
-            // password field should not be included in search
-          },
-        },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/passwords?show_password=false");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[])[0].attributes?.name).toBe("Admin Password");
-      expect((json.data as JsonApiResource[])[0].attributes?.password).toBeUndefined();
-    });
-
-    it("should filter passwords by category", async () => {
-      const mockData = createJsonApiResponse([
-        { id: "1", type: "passwords", attributes: { name: "Database Password" } },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/passwords?filter[password-category-id]=5");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[]).length).toBe(1);
-    });
-
-    it("should filter passwords by username", async () => {
-      const mockData = createJsonApiResponse([
-        { id: "1", type: "passwords", attributes: { name: "Admin Password", username: "admin" } },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/passwords?filter[username]=admin");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[])[0].attributes?.username).toBe("admin");
-    });
-  });
-
-  describe("get_password", () => {
-    it("should get a password with show_password=true by default", async () => {
-      const mockData: JsonApiResponse = {
-        data: {
-          id: "55555",
-          type: "passwords",
-          attributes: {
-            name: "Server Root Password",
-            username: "root",
-            password: "secret123",
-          },
-        },
-      };
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/passwords/55555?show_password=true");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource).attributes?.password).toBe("secret123");
-    });
-
-    it("should respect show_password=false option", async () => {
-      const mockData: JsonApiResponse = {
-        data: {
-          id: "55555",
-          type: "passwords",
-          attributes: {
-            name: "Server Root Password",
-            username: "root",
-            // No password field
-          },
-        },
-      };
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/passwords/55555?show_password=false");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource).attributes?.password).toBeUndefined();
-    });
-  });
-
   describe("search_documents", () => {
     it("should search documents by organization", async () => {
       const mockData = createJsonApiResponse([
@@ -2326,6 +2231,179 @@ describe("Locations tools (round-trip)", () => {
     });
     expect(isError(result)).toBe(true);
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+// Exercises the REAL password handlers (CallTool) over an in-memory transport
+// pair. The previous "password" tests in this file mocked fetch and then called
+// fetch directly, asserting on the mock's own payload — the search_passwords /
+// get_password handlers were never executed, so the whole surface was
+// effectively untested. fetch stays mocked underneath.
+describe("Password tools (round-trip)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function connectPasswordClient(): Promise<Client> {
+    const server = createMcpServer({ apiKey: "test-api-key" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "passwords-test", version: "1.0.0" });
+    await client.connect(clientTransport);
+    return client;
+  }
+
+  function firstText(result: unknown): string {
+    const r = result as { content?: Array<{ text?: string }> };
+    return r.content?.[0]?.text ?? "";
+  }
+
+  function isError(result: unknown): boolean {
+    return (result as { isError?: boolean }).isError === true;
+  }
+
+  it("search_passwords scopes to the organization and forces show_password=false", async () => {
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(
+        createJsonApiResponse([
+          {
+            id: "1",
+            type: "passwords",
+            attributes: { name: "VPN Admin", username: "admin" },
+          },
+        ])
+      )
+    );
+
+    const result = await client.callTool({
+      name: "search_passwords",
+      arguments: { organization_id: 8637099 },
+    });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).toContain("/passwords?");
+    expect(url).toContain("filter[organization-id]=8637099");
+    // Security: a list call must never ask IT Glue for secret material.
+    expect(url).toContain("show_password=false");
+    expect(firstText(result)).toContain("VPN Admin");
+  });
+
+  it("search_passwords never returns a password value even if the API sends one", async () => {
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(
+        createJsonApiResponse([
+          {
+            id: "1",
+            type: "passwords",
+            attributes: { name: "VPN Admin", username: "admin" },
+          },
+        ])
+      )
+    );
+
+    const result = await client.callTool({
+      name: "search_passwords",
+      arguments: { organization_id: 8637099 },
+    });
+
+    expect(firstText(result)).not.toContain("hunter2");
+  });
+
+  it("search_passwords passes name, username and category filters through", async () => {
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(createJsonApiResponse([]))
+    );
+
+    await client.callTool({
+      name: "search_passwords",
+      arguments: {
+        organization_id: 8637099,
+        name: "VPN",
+        username: "admin",
+        password_category_id: 5,
+      },
+    });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).toContain("filter[name]=VPN");
+    expect(url).toContain("filter[username]=admin");
+    expect(url).toContain("filter[password-category-id]=5");
+  });
+
+  it("get_password requests the secret value by default", async () => {
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse({
+        data: {
+          id: "55555",
+          type: "passwords",
+          attributes: { name: "Server Root", username: "root", password: "hunter2" },
+        },
+      })
+    );
+
+    const result = await client.callTool({
+      name: "get_password",
+      arguments: { id: "55555" },
+    });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).toContain("/passwords/55555");
+    expect(url).toContain("show_password=true");
+    expect(firstText(result)).toContain("hunter2");
+  });
+
+  it("get_password honours show_password=false", async () => {
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse({
+        data: {
+          id: "55555",
+          type: "passwords",
+          attributes: { name: "Server Root", username: "root" },
+        },
+      })
+    );
+
+    await client.callTool({
+      name: "get_password",
+      arguments: { id: "55555", show_password: false },
+    });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).toContain("show_password=false");
+  });
+
+  it("get_password returns an error when id is missing", async () => {
+    const client = await connectPasswordClient();
+    const result = await client.callTool({
+      name: "get_password",
+      arguments: {},
+    });
+    expect(isError(result)).toBe(true);
+    expect(firstText(result).toLowerCase()).toContain("id is required");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("surfaces an IT Glue 404 rather than reporting an empty result", async () => {
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      text: async () => '{"errors":[{"status":404,"title":"Not Found"}]}',
+    } as Response);
+
+    const result = await client.callTool({
+      name: "get_password",
+      arguments: { id: "does-not-exist" },
+    });
+
+    expect(isError(result)).toBe(true);
+    expect(firstText(result)).toContain("404");
   });
 });
 
