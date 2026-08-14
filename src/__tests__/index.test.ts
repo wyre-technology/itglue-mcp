@@ -2389,6 +2389,47 @@ describe("Password tools (round-trip)", () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  it("flags an account-wide search when no organization_id was given and the client cannot be asked", async () => {
+    // Through a gateway that does not proxy elicitation, elicitText() returns
+    // null and the handler silently drops org scoping — a caller asking for
+    // "the VPN password for Acme" gets an arbitrary slice of every org's
+    // passwords and concludes the entry does not exist. The result must say so.
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(
+        createJsonApiResponse([
+          { id: "1", type: "passwords", attributes: { name: "VPN Admin" } },
+        ])
+      )
+    );
+
+    const result = await client.callTool({
+      name: "search_passwords",
+      arguments: { name: "VPN" },
+    });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).not.toContain("filter[organization-id]");
+    const text = firstText(result);
+    expect(text).toContain("ALL organizations");
+    // and must not let the caller read an unscoped miss as "does not exist"
+    expect(text.toLowerCase()).toContain("organization_id");
+  });
+
+  it("does not flag an organization-scoped search", async () => {
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(createJsonApiResponse([]))
+    );
+
+    const result = await client.callTool({
+      name: "search_passwords",
+      arguments: { organization_id: 8637099 },
+    });
+
+    expect(firstText(result)).not.toContain("ALL organizations");
+  });
+
   it("surfaces an IT Glue 404 rather than reporting an empty result", async () => {
     const client = await connectPasswordClient();
     mockFetch.mockResolvedValueOnce({

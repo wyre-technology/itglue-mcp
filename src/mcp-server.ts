@@ -645,6 +645,37 @@ export function documentBodyOmittedNote(): string {
   );
 }
 
+/**
+ * Warning attached to a `search_*` result that ran WITHOUT an organization
+ * filter.
+ *
+ * These tools try to scope themselves by eliciting an organization name when
+ * `organization_id` is omitted. Elicitation is unavailable on any client that
+ * doesn't support it — notably through the MCP gateway, which does not proxy
+ * server-initiated requests — and the helpers return null there, so the search
+ * silently widened to the whole account. A caller that asked for "the VPN
+ * password for Acme" then received an arbitrary page drawn from every
+ * organization and reasonably concluded the entry did not exist.
+ *
+ * The query still runs (organization_id is genuinely optional — an account-wide
+ * search is a legitimate request). What changes is that the result now says
+ * which search actually happened, so an unscoped miss can't be read as proof of
+ * absence.
+ */
+export function unscopedSearchNote(
+  resource: string,
+  meta: PaginationMeta
+): string {
+  return (
+    `NOTE: no organization_id was supplied and this client could not be asked for one, ` +
+    `so this searched ${resource} across ALL organizations — returning page ${meta.currentPage} ` +
+    `of ${meta.totalPages} (${meta.totalCount} matching entries account-wide). ` +
+    `An empty or unexpected result here does NOT mean the entry is absent. ` +
+    `To scope the search, call search_organizations to find the organization's id, ` +
+    `then re-run this tool with organization_id set.`
+  );
+}
+
 /** Which filter form ultimately produced a `search_documents` listing. */
 export type DocumentSearchAttempt = "null-filter" | "ne-filter" | "unfiltered";
 
@@ -1788,13 +1819,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         const result = await client.request("/configurations", params);
+        const configText = [
+          configOrgId === undefined
+            ? unscopedSearchNote("configurations", result.meta)
+            : "",
+          JSON.stringify(result, null, 2),
+        ]
+          .filter(Boolean)
+          .join("\n\n");
         return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
+          content: [{ type: "text", text: configText }],
         };
       }
 
@@ -1867,13 +1901,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         const result = await client.request("/locations", params);
+        const locText = [
+          locOrgId === undefined ? unscopedSearchNote("locations", result.meta) : "",
+          JSON.stringify(result, null, 2),
+        ]
+          .filter(Boolean)
+          .join("\n\n");
         return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
+          content: [{ type: "text", text: locText }],
         };
       }
 
@@ -2009,13 +2044,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         params.show_password = false;
 
         const result = await client.request("/passwords", params);
+        const pwText = [
+          pwOrgId === undefined ? unscopedSearchNote("passwords", result.meta) : "",
+          JSON.stringify(result, null, 2),
+        ]
+          .filter(Boolean)
+          .join("\n\n");
         return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
+          content: [{ type: "text", text: pwText }],
         };
       }
 

@@ -125,6 +125,29 @@
 
 ### Fixed
 
+- **A scoped search silently became an account-wide one whenever the client
+  couldn't be asked for an organization.** `search_passwords`,
+  `search_configurations` and `search_locations` try to narrow themselves by
+  eliciting an organization name when `organization_id` is omitted. Every
+  helper in `src/utils/elicitation.ts` ends in a bare `catch {}` returning
+  `null`, which collapses four distinct outcomes — no server bound, client
+  doesn't support elicitation, user declined, user answered — into one. On any
+  client without elicitation support, and through the MCP gateway (which does
+  not proxy server-initiated requests at all), the prompt is never delivered,
+  the handler drops the organization filter, and the query widens to the whole
+  account. A caller asking for "the VPN password for Acme" got an arbitrary
+  page drawn from every organization and reasonably reported that the entry did
+  not exist — indistinguishable, from the outside, from the entry genuinely
+  being absent. The query still runs (`organization_id` is legitimately
+  optional, and an account-wide search is a real use case), but an unscoped
+  result now carries `unscopedSearchNote()`: it states that ALL organizations
+  were searched, gives the page/total counts so a 50-of-4,000 slice can't be
+  mistaken for the whole picture, says explicitly that an empty result is not
+  proof of absence, and points at `search_organizations` +
+  `organization_id` to narrow it. Separately, the swallowed failure is now
+  logged to stderr with its reason, so a dropped prompt leaves a trace instead
+  of being undiagnosable — it was previously invisible at every layer.
+
 - **The password tools had no effective test coverage — the suite was green
   because the "tests" tested their own mock.** The five cases under
   `describe("search_passwords")` / `describe("get_password")` in
