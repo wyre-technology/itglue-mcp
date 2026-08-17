@@ -125,6 +125,36 @@
 
 ### Fixed
 
+- **`search_passwords` could hand back plaintext secrets.** The handler asks IT
+  Glue not to send them (`show_password=false`), but that is a request, not a
+  guarantee: it sits one refactor away from being dropped, and a tenant or API
+  version that ignores the flag would spill every matched secret into the
+  model's context in a single bulk listing — the blast radius of a list call,
+  not a lookup. The test that claimed to cover this ("never returns a password
+  value even if the API sends one") used a fixture containing no password, so it
+  passed against a handler that had no redaction whatsoever. `search_passwords`
+  now strips the value on the way out via `stripPasswordValues()`, regardless of
+  what came back; `get_password` — the deliberate, one-id-at-a-time read path —
+  still returns it, and a test now pins that asymmetry.
+
+- **The account-wide-search warning disappeared exactly when it was needed.**
+  The organization filter is applied under `if (orgId)` while the warning added
+  in the previous release was gated on `orgId === undefined`. A falsy-but-present
+  id fell straight through the gap — `organization_id: 0`, or the `NaN` produced
+  by `Number(<non-numeric id>)` after an elicited organization lookup — dropping
+  the scope *and* suppressing the warning, which is precisely the silent
+  account-wide search the warning exists to prevent. Both now derive from the
+  filter that actually went out, through a single `unscopedSearchNoteFor()`
+  helper, so the two can no longer drift apart. Regression tests cover the
+  falsy-id case for all three search tools.
+
+- **The same warning misattributed its own cause.** It stated the client "could
+  not be asked" for an organization even when the user *had* been asked, *had*
+  answered, and the org-name lookup had simply matched nothing — pointing the
+  reader at a gateway elicitation problem that wasn't there. The handler cannot
+  distinguish "could not ask" from "asked, and nothing matched", so the note now
+  says what happened without guessing why.
+
 - **A scoped search silently became an account-wide one whenever the client
   couldn't be asked for an organization.** `search_passwords`,
   `search_configurations` and `search_locations` try to narrow themselves by
@@ -164,8 +194,42 @@
   `show_password=false` on list calls, name/username/category filter
   pass-through, `show_password` defaulting to true on `get_password` and
   honouring an explicit `false`, the missing-`id` guard, and an IT Glue 404
-  surfacing as an error rather than an empty result. Net +2 tests (7 real
-  replacing 5 hollow) and, for the first time, real coverage of the handlers.
+  surfacing as an error rather than an empty result. Eleven real tests replaced
+  five hollow ones and, for the first time, gave the handlers real coverage.
+
+- **The same hollowness ran through the rest of the suite: 14 of 25 tools had
+  no test that executed them.** The pattern was uniform — mock global `fetch`,
+  then call `fetch` *directly* and assert on the payload the mock had just been
+  handed, so the handler never ran and the test could not fail. The purest case
+  was `describe("Request Headers")`, which built a headers object, passed it to
+  `fetch`, and asserted the mock had captured those same values; it never
+  touched `ITGlueClient.authHeaders()`. Measured before this change: 25 tools
+  defined, 11 with a real `client.callTool` round-trip test, 14 with none, and
+  27 hollow tests. All 25 tools now have real round-trip coverage through the
+  in-memory transport idiom, and every conversion was mutation-checked —
+  deliberately breaking each handler makes its new test fail. New
+  `Core tools (round-trip)` covers the organization, configuration,
+  flexible-asset and health-check tools; new
+  `Document section tools (round-trip)` covers the section CRUD,
+  `publish_document` and archive/unarchive. `Unknown Tool Handling` asserted
+  `knownTools.length === 9` against a list literal the test itself wrote while
+  the server registered 25, and now drives the server instead, checking that
+  every advertised tool reaches a real branch rather than the unknown-tool
+  default. Tests that were purely circular were deleted outright rather than
+  rewritten: a test that cannot fail is worse than no test, because it buys
+  false confidence.
+
+- **One hollow test asserted the opposite of the shipped behaviour, and nothing
+  caught it.** "should include resource relationship in document section
+  payload" expected `create_document_section` to send a
+  `relationships.resource` binding. The handler deliberately does not: IT Glue
+  stores the section kind in the `resource_type` *attribute*, and a
+  relationships binding is rejected with a 400 for a missing `resource_type`
+  (verified live 2026-04-23, per the handler's own comment). Because the test
+  only ever inspected a payload it had constructed itself, the contradiction
+  between the test's claim and the code's behaviour sat there undetected. It is
+  replaced by a test that pins the real payload — `resource_type` present, no
+  relationships member — for both the `heading` and `text` mappings.
 
 - **`search_documents` no longer inlines document bodies, which made foldered
   organizations hang.** ([#55](https://github.com/wyre-technology/itglue-mcp/issues/55))
