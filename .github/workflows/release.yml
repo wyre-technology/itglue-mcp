@@ -35,7 +35,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
-    uses: wyre-technology/.github/.github/workflows/mcp-server-deploy.yml@a61021de876d0fd44dac777fa90f963fea25b0c3
+    uses: wyre-technology/.github/.github/workflows/mcp-server-deploy.yml@198605d0575e27374cf9b67fba3aa8c7b91de2c0
     with:
       vendor-slug: itglue
       image-name: ghcr.io/wyre-technology/itglue-mcp
